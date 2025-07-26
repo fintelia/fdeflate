@@ -1,4 +1,7 @@
+mod bitstream;
 mod bitwriter;
+mod matchfinder;
+mod parse;
 mod ultrafast;
 
 use std::io::{self, Write};
@@ -7,6 +10,8 @@ use simd_adler32::Adler32;
 pub use ultrafast::UltraFastCompressor;
 
 use bitwriter::BitWriter;
+use matchfinder::HashTableMatchFinder;
+use parse::GreedyParser;
 
 const STORED_BLOCK_MAX_SIZE: usize = u16::MAX as usize;
 const WINDOW_SIZE: usize = 32768;
@@ -64,7 +69,7 @@ impl<W: Write> Compressor<W> {
         Ok(Self {
             inner: match level {
                 0 => CompressorInner::Uncompressed,
-                _ => CompressorInner::Uncompressed, // Placeholder for other compression levels
+                1.. => CompressorInner::Fast(GreedyParser::new(5, HashTableMatchFinder::new())),
             },
             writer: BitWriter::new(writer),
             input: InputStream {
@@ -79,6 +84,16 @@ impl<W: Write> Compressor<W> {
 
     /// Write data to the compressor.
     pub fn write_data(&mut self, data: &[u8]) -> std::io::Result<()> {
+        // Encoders use 32-bit indices in various places for performance. Limiting the input size
+        // here simplifies things.
+        const CHUNK_SIZE: usize = 1024 * 1024 * 1024;
+        if data.len() > CHUNK_SIZE {
+            for chunk in data.chunks(CHUNK_SIZE) {
+                self.write_data(chunk)?;
+            }
+            return Ok(());
+        }
+
         if let Some(ref mut checksum) = self.checksum {
             checksum.write(data);
         }
@@ -98,6 +113,15 @@ impl<W: Write> Compressor<W> {
             self.input.base_index += start as u32;
             self.input.written = written - start;
             return Ok(());
+        }
+
+        // If the indices used by the compressor would overflow, reset the base index.
+        if u64::from(self.input.base_index) + data.len() as u64 > u64::from(u32::MAX) {
+            match &mut self.inner {
+                CompressorInner::Uncompressed => {}
+                CompressorInner::Fast(fast) => fast.reset_indices(self.input.base_index),
+            }
+            self.input.base_index = 0;
         }
 
         // Append the new data to the input buffer and compress it.
@@ -146,13 +170,14 @@ impl<W: Write> Compressor<W> {
 
 enum CompressorInner {
     Uncompressed,
+    Fast(GreedyParser<HashTableMatchFinder>),
 }
 impl CompressorInner {
     fn compress<W: Write>(
         &mut self,
         writer: &mut BitWriter<W>,
         input: &[u8],
-        _base_index: u32,
+        base_index: u32,
         start: usize,
         flush: Flush,
     ) -> std::io::Result<usize> {
@@ -190,6 +215,9 @@ impl CompressorInner {
                     written += input.len();
                 }
                 written
+            }
+            CompressorInner::Fast(fast) => {
+                fast.compress(writer, input, base_index, start, flush)?
             }
         };
 
