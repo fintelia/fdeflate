@@ -1,6 +1,8 @@
+mod binarytree;
 mod hashchain;
 mod hashtable;
 
+pub(crate) use binarytree::BinaryTreeMatchFinder;
 pub(crate) use hashchain::HashChainMatchFinder;
 pub(crate) use hashtable::HashTableMatchFinder;
 
@@ -46,7 +48,7 @@ pub(crate) trait MatchFinder {
         value: u64,
     ) -> Match;
 
-    fn insert(&mut self, value: u64, offset: u32);
+    fn insert(&mut self, data: &[u8], base_index: u32, value: u64, offset: u32);
 
     fn reset_indices(&mut self, old_base_index: u32);
 }

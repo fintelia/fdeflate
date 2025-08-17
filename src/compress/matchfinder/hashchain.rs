@@ -106,7 +106,7 @@ impl<const MIN_MATCH8: bool> MatchFinder for HashChainMatchFinder<MIN_MATCH8> {
         Match::empty()
     }
 
-    fn insert(&mut self, value: u64, offset: u32) {
+    fn insert(&mut self, _data: &[u8], _base_index: u32, value: u64, offset: u32) {
         let hash = super::compute_hash(value & self.mask);
         let prev_offset = self.hash_table[(hash as usize) % CACHE_SIZE];
         self.hash_table[(hash as usize) % CACHE_SIZE] = offset;

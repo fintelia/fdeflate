@@ -117,7 +117,8 @@ impl<M: MatchFinder> GreedyParser<M> {
             assert!(self.m.end() >= self.ip);
             for j in self.ip..self.m.end().min(data.len() - 8) {
                 let v = u64::from_le_bytes(data[j..][..8].try_into().unwrap());
-                self.match_finder.insert(v, base_index + j as u32);
+                self.match_finder
+                    .insert(data, base_index, v, base_index + j as u32);
             }
             self.ip = self.m.end();
 

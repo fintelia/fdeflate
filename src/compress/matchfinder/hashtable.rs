@@ -50,7 +50,7 @@ impl MatchFinder for HashTableMatchFinder {
         Match::empty()
     }
 
-    fn insert(&mut self, value: u64, index: u32) {
+    fn insert(&mut self, _data: &[u8], _base_index: u32, value: u64, index: u32) {
         let hash = super::compute_hash(value);
         self.hash_table[(hash as usize) % CACHE_SIZE] = index;
     }
