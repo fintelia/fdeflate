@@ -3,10 +3,10 @@ use std::io::{self, Write};
 use crate::{
     compress::{
         bitstream::{self, Symbol},
-        matchfinder::{Match, MatchFinder},
+        matchfinder::{MatchFinder},
         BitWriter, Flush,
     },
-    tables::{DIST_SYM_TO_DIST_EXTRA, LENGTH_TO_SYMBOL, LEN_SYM_TO_LEN_BASE, LEN_SYM_TO_LEN_EXTRA},
+    tables::{DIST_SYM_TO_DIST_EXTRA, LENGTH_TO_SYMBOL, LEN_SYM_TO_LEN_EXTRA},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -42,17 +42,6 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
         }
     }
 
-    fn rle_match(data: &[u8], ip: usize) -> Match {
-        let value = data[ip];
-
-        let mut m = Match::new(4, 1, ip + 1);
-        while m.length < 258 && data.get(m.end()) == Some(&value) {
-            m.length += 1;
-        }
-
-        m
-    }
-
     pub fn reset_indices(&mut self, old_base_index: u32) {
         self.last_index -= old_base_index;
         self.match_finder.reset_indices(old_base_index);
@@ -64,7 +53,7 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
         writer: &mut BitWriter<W>,
         data: &[u8],
         base_index: u32,
-        start: usize,
+        _start: usize,
         flush: Flush,
     ) -> io::Result<usize> {
         assert!(base_index as u64 + data.len() as u64 <= u32::MAX as u64);
@@ -99,24 +88,40 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
             data.len() + 1
         ];
 
-        for i in 1..data.len().saturating_sub(8).max(1) {
-            let mut slot = &mut matches[i];
+        let mut i = 1;
+        let mut high_water_mark = 1;
+        while i < data.len().saturating_sub(8) {
             let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
-            // let m = if current as u32 == (current >> 8) as u32 {
-            //     Self::rle_match(data, i)
-            // } else {
-            //     self.match_finder
-            //         .get_and_insert(data, base_index, i, i, current)
-            // };
-            let m = self
-                .match_finder
-                .get_and_insert(data, base_index, i, i, current);
+            if current as u32 == (current >> 8) as u32 {
+                if data[i - 1] != data[i] {
+                    i += 1;
+                }
 
-            if !m.is_empty() {
-                slot.length = m.length;
-                slot.distance = m.distance;
+                let mut length = 4;
+                while i + length < data.len() && data[i + length] == data[i] {
+                    length += 1;
+                }
 
-                assert!(i + m.length as usize <= data.len());
+                high_water_mark = high_water_mark.max(i + length);
+                while length >= 4 {
+                    matches[i].length = length.min(258) as u16;
+                    matches[i].distance = 1;
+                    i += 1;
+                    length -= 1;
+                }
+            } else {
+                let m = self
+                    .match_finder
+                    .get_and_insert(data, base_index, i, i, current);
+
+                if !m.is_empty() {
+                    matches[i].length = m.length;
+                    matches[i].distance = m.distance;
+                    high_water_mark = high_water_mark.max(i + m.length as usize);
+                    i += 1;
+                } else {
+                    i += 1 + ((i.saturating_sub(high_water_mark)) >> self.skip_ahead_shift);
+                }
             }
         }
 
