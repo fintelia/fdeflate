@@ -50,6 +50,17 @@ pub(crate) trait MatchFinder {
 
     fn insert(&mut self, data: &[u8], base_index: u32, value: u64, offset: u32);
 
+    fn get_all_and_insert(
+        &mut self,
+        data: &[u8],
+        base_index: u32,
+        anchor: usize,
+        ip: usize,
+        value: u64,
+    ) -> Vec<Match> {
+        vec![self.get_and_insert(data, base_index, anchor, ip, value)]
+    }
+
     fn reset_indices(&mut self, old_base_index: u32);
 }
 

@@ -58,11 +58,11 @@ impl BinaryTreeMatchFinder {
         ip: usize,
         value: u64,
         record_matches: bool,
-    ) -> Match {
+    ) -> Vec<Match> {
         let min_offset = (base_index + (ip as u32).saturating_sub(32768)).max(1);
 
-        let mut best_offset = 0;
         let mut best_length = 3;
+        let mut found_matches = Vec::new();
 
         // Lookup current value
         let hash = super::compute_hash(value & 0xff_ffff_ffff);
@@ -76,7 +76,7 @@ impl BinaryTreeMatchFinder {
         if offset < min_offset {
             self.child_links[pending_left] = 0;
             self.child_links[pending_right] = 0;
-            return Match::empty();
+            return found_matches;
         }
 
         let mut best_left_length = 0;
@@ -95,8 +95,12 @@ impl BinaryTreeMatchFinder {
                 }
 
                 if record_matches && length > best_length as usize {
+                    found_matches.push(Match {
+                        length: length as u16,
+                        distance: (ip - (offset - base_index) as usize) as u16,
+                        start: ip,
+                    });
                     best_length = length as u16;
-                    best_offset = offset as u32;
                 }
 
                 if length >= self.early_return_length || ip + length == data.len() {
@@ -141,15 +145,7 @@ impl BinaryTreeMatchFinder {
             }
         }
 
-        if best_length >= 4 {
-            return Match {
-                length: best_length,
-                distance: (ip - (best_offset - base_index) as usize) as u16,
-                start: ip,
-            };
-        }
-
-        Match::empty()
+        found_matches
     }
 }
 impl MatchFinder for BinaryTreeMatchFinder {
@@ -162,6 +158,8 @@ impl MatchFinder for BinaryTreeMatchFinder {
         value: u64,
     ) -> Match {
         self.update(data, base_index, ip, value, true)
+            .pop()
+            .unwrap_or(Match::empty())
     }
 
     fn insert(&mut self, data: &[u8], base_index: u32, value: u64, offset: u32) {
@@ -172,6 +170,17 @@ impl MatchFinder for BinaryTreeMatchFinder {
             value,
             false,
         );
+    }
+
+    fn get_all_and_insert(
+        &mut self,
+        data: &[u8],
+        base_index: u32,
+        _anchor: usize,
+        ip: usize,
+        value: u64,
+    ) -> Vec<Match> {
+        self.update(data, base_index, ip, value, true)
     }
 
     fn reset_indices(&mut self, old_base_index: u32) {
