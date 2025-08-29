@@ -3,13 +3,13 @@ use std::io::{self, Write};
 use crate::{
     compress::{
         bitstream::{self, Symbol},
-        matchfinder::{HashChainMatchFinder, MatchFinder},
+        matchfinder::MatchFinder,
         BitWriter, Flush,
     },
     tables::{DIST_SYM_TO_DIST_EXTRA, LENGTH_TO_SYMBOL, LEN_SYM_TO_LEN_EXTRA},
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Slot {
     length: u16,
     distance: u16,
@@ -63,7 +63,9 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
         self.match_finder.reset_indices(old_base_index);
     }
 
-    fn store_literal_cost(&mut self, index: usize, byte: u8) {
+    fn store_literal_cost(&mut self, block_start: usize, index: usize, byte: u8) {
+        let index = index - block_start;
+
         let cost = u32::from(self.costs[byte as usize]) + self.slots[index].cost;
         if self.slots[index + 1].cost > cost {
             self.slots[index + 1].cost = cost;
@@ -72,7 +74,9 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
         }
     }
 
-    fn store_match_cost(&mut self, index: usize, length: u16, distance: u16) {
+    fn store_match_cost(&mut self, block_start: usize, index: usize, length: u16, distance: u16) {
+        let index = index - block_start;
+
         assert!(self.slots[index].cost < u32::MAX / 2);
 
         let dist_cost =
@@ -129,11 +133,16 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
         for i in 257..286 {
             self.costs[i] = 6 + LEN_SYM_TO_LEN_EXTRA[i - 257];
         }
+        self.costs[257] = 15;
         for i in 0..30 {
             self.dist_costs[i] = 5 + DIST_SYM_TO_DIST_EXTRA[i];
         }
 
+        let mut first_block = true;
+
         const OPT_WINDOW: usize = 4096;
+
+        // self.slots = vec![Slot::default(); OPT_WINDOW + 1];
 
         let mut i = 0;
         while i < data.len().saturating_sub(8) {
@@ -147,7 +156,7 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
             while i < block_end
             /*&& i < high_water_mark*/
             {
-                self.store_literal_cost(i - block_start, data[i]);
+                self.store_literal_cost(block_start, i, data[i]);
 
                 let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
 
@@ -166,7 +175,7 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
 
                     if i == 0 || data[i - 1] != data[i] {
                         i += 1;
-                        self.store_literal_cost(i - block_start, data[i]);
+                        self.store_literal_cost(block_start, i, data[i]);
                     }
 
                     // Find the match length.
@@ -176,12 +185,12 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                     }
 
                     // Store the match cost.
-                    self.store_match_cost(i - block_start, length.min(258) as u16, 1);
+                    self.store_match_cost(block_start, i, length.min(258) as u16, 1);
 
                     // Also store the costs of matches starting at future positions in the run.
                     for j in 1..=(length - 3) {
-                        self.store_literal_cost(i - block_start + j, data[i + j]);
-                        self.store_match_cost(i - block_start + j, (length - j).min(258) as u16, 1);
+                        self.store_literal_cost(block_start, i + j, data[i + j]);
+                        self.store_match_cost(block_start, i + j, (length - j).min(258) as u16, 1);
                     }
 
                     high_water_mark = high_water_mark.max(i + length);
@@ -201,7 +210,7 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                     }
 
                     for j in 1..=skip_ahead {
-                        self.store_literal_cost(i - block_start + j, data[i + j]);
+                        self.store_literal_cost(block_start, i + j, data[i + j]);
                     }
                     i += 1 + skip_ahead;
                     continue;
@@ -211,7 +220,7 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                 for m in &ms {
                     while max_len <= m.length as usize && max_len <= 258 && i + max_len <= block_end
                     {
-                        self.store_match_cost(i - block_start, max_len as u16, m.distance);
+                        self.store_match_cost(block_start, i, max_len as u16, m.distance);
                         max_len += 1;
                     }
                 }
@@ -226,12 +235,10 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                 // }
             }
 
-            // println!("block {}..{}:", block_start, high_water_mark);
-            // println!("matches: {:#?}", &matches[..16]);
+            // // Block may have ended early if we reached the high water mark.
+            // let block_end = block_end.min(high_water_mark);
 
-            // Backtrack to record the optimal path.
-            // let mut j = high_water_mark - block_start;
-            let mut prev_index = /*high_water_mark*/block_end - block_start;
+            let mut prev_index = block_end - block_start;
             let mut prev = self.slots[prev_index];
             loop {
                 assert!(prev.cost < u32::MAX / 2);
@@ -251,7 +258,7 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
             // And convert to symbols in the forward direction.
             let mut j = 0;
             let mut symbol_run = 0;
-            while j + symbol_run < /*high_water_mark*/block_end - block_start {
+            while j + symbol_run < block_end - block_start {
                 let m = &self.slots[j + symbol_run];
                 assert!(m.length != 0);
                 if m.length == 1 {
@@ -274,7 +281,9 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                     j += m.length as usize;
 
                     assert!(j as usize <= block_end);
-                    if symbols.len() >= 16384 {
+                    if symbols.len() >= 16384 || (first_block && symbols.len() >= 1024) {
+                        first_block = false;
+
                         let last_block = flush == Flush::Finish && j as usize == data.len();
 
                         let codes = bitstream::compute_block_codes(data, base_index, &symbols);
@@ -310,10 +319,18 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                 });
                 j += symbol_run;
             }
-            assert_eq!(
-                block_start + j as usize,
-                block_end /*.min(high_water_mark)*/
-            );
+            assert_eq!(block_start + j as usize, block_end);
+
+            // self.slots[..=(high_water_mark - block_start).min(OPT_WINDOW)].fill(Slot::default());
+
+            // for k in 0..OPT_WINDOW {
+            //     assert_eq!(
+            //         self.slots[k],
+            //         Slot::default(),
+            //         "k={k} start={} end={OPT_WINDOW}",
+            //         high_water_mark - block_start,
+            //     );
+            // }
 
             // while symbols.len() > 16384 {
             //     let codes = bitstream::compute_block_codes(data, base_index, &symbols[..16384]);
