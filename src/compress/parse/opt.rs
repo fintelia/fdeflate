@@ -9,20 +9,16 @@ use crate::{
     tables::{DIST_SYM_TO_DIST_EXTRA, LENGTH_TO_SYMBOL, LEN_SYM_TO_LEN_EXTRA},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Slot {
-    length: u16,
+    length: u8,
     distance: u16,
+
+    length2: u8,
+    distance2: u16,
+
     cost: u32,
-}
-impl Default for Slot {
-    fn default() -> Self {
-        Self {
-            length: 0,
-            distance: 0,
-            cost: u32::MAX / 2,
-        }
-    }
+    chosen_length: u16,
 }
 
 pub(crate) struct DynamicProgrammingParser<M> {
@@ -38,6 +34,8 @@ pub(crate) struct DynamicProgrammingParser<M> {
 
     costs: [u8; 286],
     dist_costs: [u8; 30],
+    initialized_costs: bool,
+
     slots: Vec<Slot>,
 }
 
@@ -52,8 +50,9 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
             // m: Match::empty(),
             last_index: 0,
 
-            costs: [0; 286],
-            dist_costs: [0; 30],
+            costs: [9; 286],
+            dist_costs: [6; 30],
+            initialized_costs: false,
             slots: Vec::new(),
         }
     }
@@ -63,30 +62,59 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
         self.match_finder.reset_indices(old_base_index);
     }
 
-    fn store_literal_cost(&mut self, block_start: usize, index: usize, byte: u8) {
-        let index = index - block_start;
+    // fn store_literal_cost(&mut self, block_start: usize, index: usize, byte: u8) {
+    //     let index = index - block_start;
 
-        let cost = u32::from(self.costs[byte as usize]) + self.slots[index].cost;
-        if self.slots[index + 1].cost > cost {
-            self.slots[index + 1].cost = cost;
-            self.slots[index + 1].length = 1;
-            self.slots[index + 1].distance = 0;
+    //     let cost = u32::from(self.costs[byte as usize]) + self.slots[index].cost;
+    //     if self.slots[index + 1].cost > cost {
+    //         self.slots[index + 1].cost = cost;
+    //         self.slots[index + 1].length = 1;
+    //         self.slots[index + 1].distance = 0;
+    //     }
+    // }
+
+    // fn store_match_cost(&mut self, block_start: usize, index: usize, length: u16, distance: u16) {
+    //     let index = index - block_start;
+
+    //     assert!(self.slots[index].cost < u32::MAX / 2);
+
+    //     let dist_cost =
+    //         u32::from(self.dist_costs[bitstream::distance_to_dist_sym(distance) as usize]);
+    //     let len_cost = u32::from(self.costs[LENGTH_TO_SYMBOL[length as usize - 3] as usize]);
+    //     let cost = dist_cost + len_cost + self.slots[index].cost;
+    //     if self.slots[index + length as usize].cost > cost {
+    //         self.slots[index + length as usize].cost = cost;
+    //         self.slots[index + length as usize].length = length;
+    //         self.slots[index + length as usize].distance = distance;
+    //     }
+    // }
+
+    fn compute_costs(
+        &mut self,
+        frequencies: &[u16; 286],
+        dist_frequencies: &[u16; 30],
+        total_symbols: u16,
+        total_backrefs: u16,
+    ) {
+        self.costs = [15; 286];
+        self.dist_costs = [10; 30];
+        for (i, f) in frequencies.iter().enumerate() {
+            if *f > 0 {
+                self.costs[i] = (((*f) as f32 / total_symbols as f32).log2() * -1.0)
+                    .round()
+                    .clamp(1.0, 15.0) as u8;
+                if i >= 257 {
+                    self.costs[i] += LEN_SYM_TO_LEN_EXTRA[i - 257];
+                }
+            }
         }
-    }
-
-    fn store_match_cost(&mut self, block_start: usize, index: usize, length: u16, distance: u16) {
-        let index = index - block_start;
-
-        assert!(self.slots[index].cost < u32::MAX / 2);
-
-        let dist_cost =
-            u32::from(self.dist_costs[bitstream::distance_to_dist_sym(distance) as usize]);
-        let len_cost = u32::from(self.costs[LENGTH_TO_SYMBOL[length as usize - 3] as usize]);
-        let cost = dist_cost + len_cost + self.slots[index].cost;
-        if self.slots[index + length as usize].cost > cost {
-            self.slots[index + length as usize].cost = cost;
-            self.slots[index + length as usize].length = length;
-            self.slots[index + length as usize].distance = distance;
+        for (i, f) in dist_frequencies.iter().enumerate() {
+            if *f > 0 {
+                self.dist_costs[i] = (((*f) as f32 / total_backrefs as f32).log2() * -1.0)
+                    .round()
+                    .clamp(1.0, 15.0) as u8
+                    + DIST_SYM_TO_DIST_EXTRA[i]
+            }
         }
     }
 
@@ -138,44 +166,33 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
             self.dist_costs[i] = 5 + DIST_SYM_TO_DIST_EXTRA[i];
         }
 
-        let mut first_block = true;
+        const OPT_WINDOW: usize = 16384;
 
-        const OPT_WINDOW: usize = 4096;
+        if data.len() >= 8 {
+            let current = u64::from_le_bytes(data[..8].try_into().unwrap());
+            self.match_finder.insert(data, base_index, current, 0);
+        }
 
-        // self.slots = vec![Slot::default(); OPT_WINDOW + 1];
+        for block_start in (0..data.len()).step_by(OPT_WINDOW) {
+            let block_length = (OPT_WINDOW).min(data.len() - block_start);
+            let block_end = block_start + block_length;
 
-        let mut i = 0;
-        while i < data.len().saturating_sub(8) {
-            self.slots = vec![Slot::default(); OPT_WINDOW + 1];
-            self.slots[0].cost = 0;
-
-            let block_start = i;
-            let block_end = (i + OPT_WINDOW).min(data.len().saturating_sub(8));
+            self.slots = vec![Slot::default(); block_length + 1];
 
             let mut high_water_mark = block_start + 1;
-            while i < block_end
-            /*&& i < high_water_mark*/
-            {
-                self.store_literal_cost(block_start, i, data[i]);
 
+            let max_search_pos = block_end.min(data.len().saturating_sub(8));
+            let mut i = block_start.max(1);
+            while i < max_search_pos {
                 let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
-
-                if i == 0 {
-                    self.match_finder
-                        .insert(data, base_index, current, i as u32);
-                    i += 1;
-                    continue;
-                }
-
                 if current as u32 == (current >> 8) as u32 {
-                    if i + 4 >= block_end {
-                        i += 1;
-                        continue;
-                    }
+                    // if i + 4 >= block_end {
+                    //     i += 1;
+                    //     continue;
+                    // }
 
-                    if i == 0 || data[i - 1] != data[i] {
+                    if data[i - 1] != data[i] {
                         i += 1;
-                        self.store_literal_cost(block_start, i, data[i]);
                     }
 
                     // Find the match length.
@@ -184,13 +201,11 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                         length += 1;
                     }
 
-                    // Store the match cost.
-                    self.store_match_cost(block_start, i, length.min(258) as u16, 1);
-
-                    // Also store the costs of matches starting at future positions in the run.
-                    for j in 1..=(length - 3) {
-                        self.store_literal_cost(block_start, i + j, data[i + j]);
-                        self.store_match_cost(block_start, i + j, (length - j).min(258) as u16, 1);
+                    // Store the matches.
+                    for j in 0..=(length - 3) {
+                        let slot = &mut self.slots[i + j - block_start];
+                        slot.length = (length - j - 3).min(255) as u8;
+                        slot.distance = 1;
                     }
 
                     high_water_mark = high_water_mark.max(i + length);
@@ -203,167 +218,203 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                     .get_all_and_insert(data, base_index, i, i, current);
 
                 if ms.is_empty() {
-                    let skip_ahead = (i.saturating_sub(high_water_mark)) >> self.skip_ahead_shift;
-                    if skip_ahead == 0 || i + skip_ahead >= block_end {
-                        i += 1;
-                        continue;
-                    }
-
-                    for j in 1..=skip_ahead {
-                        self.store_literal_cost(block_start, i + j, data[i + j]);
-                    }
-                    i += 1 + skip_ahead;
+                    i += 1 + ((i.saturating_sub(high_water_mark)) >> self.skip_ahead_shift);
                     continue;
                 }
 
-                let mut max_len = 3;
-                for m in &ms {
-                    while max_len <= m.length as usize && max_len <= 258 && i + max_len <= block_end
-                    {
-                        self.store_match_cost(block_start, i, max_len as u16, m.distance);
-                        max_len += 1;
-                    }
+                let last_match = ms.len() - 1;
+                let slot = &mut self.slots[i - block_start];
+
+                assert!(ms[last_match].length >= 3);
+
+                slot.length = (ms[last_match].length - 3) as u8;
+                slot.distance = ms[last_match].distance;
+                if ms.len() > 1 {
+                    slot.length2 = (ms[last_match - 1].length - 3) as u8;
+                    slot.distance2 = ms[last_match - 1].distance;
                 }
-                high_water_mark = high_water_mark
-                    .max(i + ms.last().unwrap().length as usize)
-                    .min(data.len());
-                // if max_len > 128 {
-                //     i += max_len - 32;
+
+                high_water_mark = high_water_mark.max(i + 3 + slot.length as usize);
+
+                // if slot.length > 75 {
+                //     i += slot.length as usize;
                 // } else {
-                i += 1;
-                // }
+                    i += 1;
                 // }
             }
 
-            // // Block may have ended early if we reached the high water mark.
-            // let block_end = block_end.min(high_water_mark);
+            // If necessary, do a greedy pass to estimate the frequencies of symbols.
+            if !self.initialized_costs {
+                self.initialized_costs = true;
 
-            let mut prev_index = block_end - block_start;
-            let mut prev = self.slots[prev_index];
-            loop {
-                assert!(prev.cost < u32::MAX / 2);
+                let mut total_symbols = 0;
+                let mut total_backrefs = 0;
+                let mut frequencies = [0; 286];
+                let mut dist_frequencies = [0; 30];
+                frequencies[256] = 1; // EOF symbol
 
-                let new_prev_index = prev_index - prev.length as usize;
-                let new_prev = self.slots[new_prev_index];
+                let mut i = 0;
+                while i < block_length {
+                    if self.slots[i].distance > 0 && i + 3 <= self.slots.len() {
+                        frequencies[LENGTH_TO_SYMBOL[self.slots[i].length as usize] as usize] += 1;
+                        dist_frequencies
+                            [bitstream::distance_to_dist_sym(self.slots[i].distance) as usize] += 1;
+                        i += self.slots[i].length as usize + 3;
+                        total_backrefs += 1;
+                    } else {
+                        frequencies[data[i] as usize] += 1;
+                        i += 1;
+                    }
+                    total_symbols += 1;
+                }
 
-                self.slots[new_prev_index] = prev;
-                prev_index = new_prev_index;
-                prev = new_prev;
+                self.compute_costs(
+                    &frequencies,
+                    &dist_frequencies,
+                    total_symbols,
+                    total_backrefs,
+                );
+            }
 
-                if prev_index == 0 {
-                    break;
+            for passes_left in (0..2).rev() {
+                self.slots[block_length].cost = 0;
+                self.slots[block_length].chosen_length = 1;
+
+                for j in (0..block_length).rev() {
+                    let lit_cost = u32::from(self.costs[data[j] as usize]) + self.slots[j + 1].cost;
+
+                    if self.slots[j].distance == 0 {
+                        self.slots[j].cost = lit_cost;
+                        self.slots[j].chosen_length = 1;
+                    } else {
+                        let mut best_length = 1;
+                        let mut best_cost = lit_cost;
+                        let dist_cost = u32::from(
+                            self.dist_costs
+                                [bitstream::distance_to_dist_sym(self.slots[j].distance) as usize],
+                        );
+
+                        let length = (self.slots[j].length as usize + 3).min(block_length - j);
+                        for k in 3..=length {
+                            let cost = dist_cost
+                                + u32::from(self.costs[LENGTH_TO_SYMBOL[k - 3] as usize])
+                                + self.slots[j + k].cost;
+                            if cost < best_cost {
+                                best_length = k as u16;
+                                best_cost = cost
+                            }
+                        }
+
+                        self.slots[j].cost = best_cost;
+                        self.slots[j].chosen_length = best_length;
+                        assert!(j + best_length as usize <= block_length);
+                    }
+                }
+
+                if passes_left != 0 {
+                    let mut total_symbols = 0;
+                    let mut total_backrefs = 0;
+                    let mut frequencies = [0; 286];
+                    let mut dist_frequencies = [0; 30];
+
+                    frequencies[256] = 1; // EOF symbol
+
+                    let mut i = 0;
+                    while i < block_length {
+                        let m = &self.slots[i];
+                        if m.chosen_length != 1 {
+                            frequencies[LENGTH_TO_SYMBOL[m.chosen_length as usize - 3] as usize] +=
+                                1;
+                            dist_frequencies
+                                [bitstream::distance_to_dist_sym(m.distance) as usize] += 1;
+                            i += m.chosen_length as usize;
+                            total_backrefs += 1;
+                        } else {
+                            frequencies[data[i] as usize] += 1;
+                            i += 1;
+                        }
+                        total_symbols += 1;
+                    }
+
+                    self.compute_costs(
+                        &frequencies,
+                        &dist_frequencies,
+                        total_symbols,
+                        total_backrefs,
+                    );
                 }
             }
 
             // And convert to symbols in the forward direction.
             let mut j = 0;
             let mut symbol_run = 0;
-            while j + symbol_run < block_end - block_start {
-                let m = &self.slots[j + symbol_run];
-                assert!(m.length != 0);
-                if m.length == 1 {
+            while j < block_length {
+                let m = &self.slots[j];
+                assert!(j + m.chosen_length as usize <= block_length);
+                assert!(m.chosen_length != 0);
+                if m.chosen_length == 1 {
                     symbol_run += 1;
+                    j += 1;
+                    assert!(j as usize <= block_length);
+                    continue;
+                }
+
+                let distance = if m.distance2 != 0 && m.chosen_length <= u16::from(m.length2) + 3 {
+                    m.distance2
                 } else {
-                    assert!(m.distance > 0);
-                    if symbol_run > 0 {
-                        symbols.push(Symbol::LiteralRun {
-                            start: (block_start + j) as u32,
-                            end: (block_start + j + symbol_run) as u32,
-                        });
-                        j += symbol_run;
-                        symbol_run = 0;
-                    }
-                    symbols.push(Symbol::Backref {
-                        length: m.length,
-                        distance: m.distance,
-                        dist_sym: bitstream::distance_to_dist_sym(m.distance),
+                    m.distance
+                };
+                // let distance = m.distance;
+                assert!(distance > 0);
+                assert!(
+                    (distance as usize) <= block_start + j,
+                    "distance={} index={}",
+                    distance,
+                    block_start + j
+                );
+
+                if symbol_run > 0 {
+                    symbols.push(Symbol::LiteralRun {
+                        start: (block_start + j - symbol_run) as u32,
+                        end: (block_start + j) as u32,
                     });
-                    j += m.length as usize;
+                    symbol_run = 0;
+                }
 
-                    assert!(j as usize <= block_end);
-                    if symbols.len() >= 16384 || (first_block && symbols.len() >= 1024) {
-                        first_block = false;
+                symbols.push(Symbol::Backref {
+                    length: m.chosen_length,
+                    distance,
+                    dist_sym: bitstream::distance_to_dist_sym(distance),
+                });
+                j += m.chosen_length as usize;
 
-                        let last_block = flush == Flush::Finish && j as usize == data.len();
-
-                        let codes = bitstream::compute_block_codes(data, base_index, &symbols);
-
-                        for i in 0..286 {
-                            self.costs[i] = if codes.lengths[i] > 0 {
-                                codes.lengths[i]
-                            } else {
-                                15
-                            };
-                            if i >= 257 {
-                                self.costs[i] += LEN_SYM_TO_LEN_EXTRA[i - 257];
-                            }
-                        }
-                        for i in 0..30 {
-                            self.dist_costs[i] = if codes.dist_lengths[i] > 0 {
-                                codes.dist_lengths[i]
-                            } else {
-                                15
-                            };
-                            self.dist_costs[i] += DIST_SYM_TO_DIST_EXTRA[i];
-                        }
-
-                        bitstream::write_block(writer, data, base_index, &symbols, last_block)?;
-                        symbols.clear();
-                    }
+                assert!(
+                    j as usize <= block_length,
+                    "j={} block_length={} chosen_length={}",
+                    j,
+                    block_length,
+                    m.chosen_length
+                );
+                if symbols.len() >= 16384 {
+                    let last_block = flush == Flush::Finish && j as usize == data.len();
+                    bitstream::write_block(writer, data, base_index, &symbols, last_block)?;
+                    symbols.clear();
                 }
             }
+            assert_eq!(j as usize, block_length);
+
             if symbol_run > 0 {
                 symbols.push(Symbol::LiteralRun {
-                    start: (block_start + j) as u32,
-                    end: (block_start + j + symbol_run) as u32,
+                    start: (block_end - symbol_run) as u32,
+                    end: block_end as u32,
                 });
-                j += symbol_run;
             }
-            assert_eq!(block_start + j as usize, block_end);
 
-            // self.slots[..=(high_water_mark - block_start).min(OPT_WINDOW)].fill(Slot::default());
-
-            // for k in 0..OPT_WINDOW {
-            //     assert_eq!(
-            //         self.slots[k],
-            //         Slot::default(),
-            //         "k={k} start={} end={OPT_WINDOW}",
-            //         high_water_mark - block_start,
-            //     );
+            // if symbols.len() >= 4096 {
+            //     let last_block = flush == Flush::Finish && j as usize == data.len();
+            //     bitstream::write_block(writer, data, base_index, &symbols, last_block)?;
+            //     symbols.clear();
             // }
-
-            // while symbols.len() > 16384 {
-            //     let codes = bitstream::compute_block_codes(data, base_index, &symbols[..16384]);
-
-            //     for i in 0..286 {
-            //         self.costs[i] = if codes.lengths[i] > 0 {
-            //             codes.lengths[i]
-            //         } else {
-            //             15
-            //         };
-            //         if i >= 257 {
-            //             self.costs[i] += LEN_SYM_TO_LEN_EXTRA[i - 257];
-            //         }
-            //     }
-            //     for i in 0..30 {
-            //         self.dist_costs[i] = if codes.dist_lengths[i] > 0 {
-            //             codes.dist_lengths[i]
-            //         } else {
-            //             15
-            //         };
-            //         self.dist_costs[i] += DIST_SYM_TO_DIST_EXTRA[i];
-            //     }
-
-            //     bitstream::write_block(writer, data, base_index, &symbols[..16384], false)?;
-            //     symbols.drain(..16384);
-            // }
-        }
-
-        if i < data.len() {
-            symbols.push(Symbol::LiteralRun {
-                start: i as u32,
-                end: data.len() as u32,
-            });
         }
 
         if !symbols.is_empty() {
