@@ -166,7 +166,7 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
             self.dist_costs[i] = 5 + DIST_SYM_TO_DIST_EXTRA[i];
         }
 
-        const OPT_WINDOW: usize = 65536;
+        const OPT_WINDOW: usize = 100000;// 65536;
 
         if data.len() >= 8 {
             let current = u64::from_le_bytes(data[..8].try_into().unwrap());
@@ -185,12 +185,7 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
             let mut i = block_start.max(1);
             while i < max_search_pos {
                 let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
-                if current as u32 == (current >> 8) as u32 {
-                    // if i + 4 >= block_end {
-                    //     i += 1;
-                    //     continue;
-                    // }
-
+                if current as u32 == (current >> 8) as u32 && false {
                     let mut length = 4;
                     if data[i - 1] != data[i] {
                         i += 1;
@@ -239,16 +234,16 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                 high_water_mark = high_water_mark.max(i + 3 + slot.length as usize);
 
                 // if slot.length > 150 {
-                // //     let length = slot.length as usize + 3;
-                // //     let distance = slot.distance;
-                // //     for j in 0..(length - 10).min(block_end - i) {
-                // //         let slot = &mut self.slots[i + j as usize - block_start];
-                // //         slot.length = (length - j - 3).min(255) as u8;
-                // //         slot.distance = distance;
-                // //     }
+                //     // //     let length = slot.length as usize + 3;
+                //     // //     let distance = slot.distance;
+                //     // //     for j in 0..(length - 10).min(block_end - i) {
+                //     // //         let slot = &mut self.slots[i + j as usize - block_start];
+                //     // //         slot.length = (length - j - 3).min(255) as u8;
+                //     // //         slot.distance = distance;
+                //     // //     }
                 //     i += slot.length as usize - 10;
                 // } else {
-                i += 1;
+                    i += 1;
                 // }
             }
 
@@ -285,12 +280,13 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                 );
             }
 
-            for passes_left in (0..2).rev() {
+            for passes_left in (0..4).rev() {
                 self.slots[block_length].cost = 0;
                 self.slots[block_length].chosen_length = 1;
 
                 for j in (0..block_length).rev() {
-                    let lit_cost = u32::from(self.costs[data[block_start + j] as usize]) + self.slots[j + 1].cost;
+                    let lit_cost = u32::from(self.costs[data[block_start + j] as usize])
+                        + self.slots[j + 1].cost;
                     let slot = &self.slots[j];
 
                     if slot.distance == 0 {
@@ -340,7 +336,7 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                     }
                 }
 
-                if passes_left != 0 {
+                if passes_left != 0 || true {
                     let mut total_symbols = 0;
                     let mut total_backrefs = 0;
                     let mut frequencies = [0; 286];
@@ -424,11 +420,11 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                     block_length,
                     m.chosen_length
                 );
-                // if symbols.len() >= 16384 {
-                //     let last_block = flush == Flush::Finish && j as usize == data.len();
-                //     bitstream::write_block(writer, data, base_index, &symbols, last_block)?;
-                //     symbols.clear();
-                // }
+                if symbols.len() >= 16384 {
+                    let last_block = flush == Flush::Finish && block_start + j as usize == data.len();
+                    bitstream::write_block(writer, data, base_index, &symbols, last_block)?;
+                    symbols.clear();
+                }
             }
             assert_eq!(j as usize, block_length);
 
@@ -437,12 +433,6 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                     start: (block_end - symbol_run) as u32,
                     end: block_end as u32,
                 });
-            }
-
-            if !symbols.is_empty() {
-                let last_block = flush == Flush::Finish && block_end == data.len();
-                bitstream::write_block(writer, data, base_index, &symbols, last_block)?;
-                symbols.clear();
             }
         }
 
