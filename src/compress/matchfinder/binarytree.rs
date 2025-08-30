@@ -37,6 +37,8 @@ pub(crate) struct BinaryTreeMatchFinder {
     child_links: Box<[u32; WINDOW_SIZE * 2]>,
     search_depth: u16,
     early_return_length: usize,
+
+    hash3_table: Box<[u32; 4096]>,
 }
 impl BinaryTreeMatchFinder {
     pub(crate) fn new(search_depth: u16) -> Self {
@@ -46,6 +48,7 @@ impl BinaryTreeMatchFinder {
                 .into_boxed_slice()
                 .try_into()
                 .unwrap(),
+            hash3_table: vec![0; 4096].into_boxed_slice().try_into().unwrap(),
             search_depth,
             early_return_length: 258,
         }
@@ -64,8 +67,25 @@ impl BinaryTreeMatchFinder {
         let mut best_length = 3;
         let mut found_matches = Vec::new();
 
+        let hash3 = super::compute_hash(value & 0xffffff) % 4096;
+        if record_matches {
+            let index3 = self.hash3_table[hash3 as usize];
+            if index3 >= min_offset {
+                let length = match_length(data, ip, (index3 - base_index) as usize);
+                if length >= 3 {
+                    found_matches.push(Match {
+                        length,
+                        distance: (ip - (index3 - base_index) as usize) as u16,
+                        start: ip,
+                    });
+                    best_length = length;
+                }
+            }
+        }
+        self.hash3_table[hash3 as usize] = ip as u32 + base_index;
+
         // Lookup current value
-        let hash = super::compute_hash(value & 0xff_ffff_ffff);
+        let hash = super::compute_hash(value & 0xffff_ffff);
         let hash_index = (hash as usize) % CACHE_SIZE;
         let mut offset = self.hash_table[hash_index];
         self.hash_table[hash_index] = ip as u32;
