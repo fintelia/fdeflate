@@ -32,6 +32,7 @@ pub(crate) struct NearOptimalParser {
     last_index: u32,
 
     costs: [u8; 286],
+    length_costs: [u8; 259],
     dist_costs: [u8; 30],
     initialized_costs: bool,
 
@@ -50,6 +51,7 @@ impl NearOptimalParser {
             last_index: 0,
 
             costs: [9; 286],
+            length_costs: [9; 259],
             dist_costs: [6; 30],
             initialized_costs: false,
             slots: Vec::new(),
@@ -114,6 +116,10 @@ impl NearOptimalParser {
                     .clamp(1.0, 15.0) as u8
                     + DIST_SYM_TO_DIST_EXTRA[i]
             }
+        }
+
+        for len in 3..=258 {
+            self.length_costs[len] = self.costs[LENGTH_TO_SYMBOL[len - 3] as usize];
         }
     }
 
@@ -300,7 +306,7 @@ impl NearOptimalParser {
                         };
                         for k in start..=length {
                             let cost = dist_cost
-                                + u32::from(self.costs[LENGTH_TO_SYMBOL[k - 3] as usize])
+                                + u32::from(self.length_costs[k as usize])
                                 + self.slots[j + k].cost;
                             if cost < best_cost {
                                 best_length = k as u16;
