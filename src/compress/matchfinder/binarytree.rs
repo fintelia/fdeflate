@@ -37,8 +37,6 @@ pub(crate) struct BinaryTreeMatchFinder {
     child_links: Box<[u32; WINDOW_SIZE * 2]>,
     search_depth: u16,
     early_return_length: usize,
-
-    hash3_table: Box<[u32; 4096]>,
 }
 impl BinaryTreeMatchFinder {
     pub(crate) fn new(search_depth: u16) -> Self {
@@ -48,7 +46,6 @@ impl BinaryTreeMatchFinder {
                 .into_boxed_slice()
                 .try_into()
                 .unwrap(),
-            hash3_table: vec![0; 4096].into_boxed_slice().try_into().unwrap(),
             search_depth,
             early_return_length: 258,
         }
@@ -61,28 +58,11 @@ impl BinaryTreeMatchFinder {
         ip: usize,
         value: u64,
         record_matches: bool,
-    ) -> Vec<Match> {
+    ) -> Match {
         let min_offset = (base_index + (ip as u32).saturating_sub(32768)).max(1);
 
+        let mut best_offset = 0;
         let mut best_length = 3;
-        let mut found_matches = Vec::new();
-
-        let hash3 = super::compute_hash(value & 0xffffff) % 4096;
-        if record_matches {
-            let index3 = self.hash3_table[hash3 as usize];
-            if index3 >= min_offset {
-                let length = match_length(data, ip, (index3 - base_index) as usize);
-                if length >= 3 {
-                    found_matches.push(Match {
-                        length,
-                        distance: (ip - (index3 - base_index) as usize) as u16,
-                        start: ip,
-                    });
-                    best_length = length;
-                }
-            }
-        }
-        self.hash3_table[hash3 as usize] = ip as u32 + base_index;
 
         // Lookup current value
         let hash = super::compute_hash(value & 0xffff_ffff);
@@ -96,7 +76,7 @@ impl BinaryTreeMatchFinder {
         if offset < min_offset {
             self.child_links[pending_left] = 0;
             self.child_links[pending_right] = 0;
-            return found_matches;
+            return Match::empty();
         }
 
         let mut best_left_length = 0;
@@ -115,12 +95,8 @@ impl BinaryTreeMatchFinder {
                 }
 
                 if record_matches && length > best_length as usize {
-                    found_matches.push(Match {
-                        length: length as u16,
-                        distance: (ip - (offset - base_index) as usize) as u16,
-                        start: ip,
-                    });
                     best_length = length as u16;
+                    best_offset = offset as u32;
                 }
 
                 if length >= self.early_return_length || ip + length == data.len() {
@@ -165,7 +141,15 @@ impl BinaryTreeMatchFinder {
             }
         }
 
-        found_matches
+        if best_length >= 4 {
+            return Match {
+                length: best_length,
+                distance: (ip - (best_offset - base_index) as usize) as u16,
+                start: ip,
+            };
+        }
+
+        Match::empty()
     }
 }
 impl MatchFinder for BinaryTreeMatchFinder {
@@ -178,8 +162,6 @@ impl MatchFinder for BinaryTreeMatchFinder {
         value: u64,
     ) -> Match {
         self.update(data, base_index, ip, value, true)
-            .pop()
-            .unwrap_or(Match::empty())
     }
 
     fn insert(&mut self, data: &[u8], base_index: u32, value: u64, offset: u32) {
@@ -190,17 +172,6 @@ impl MatchFinder for BinaryTreeMatchFinder {
             value,
             false,
         );
-    }
-
-    fn get_all_and_insert(
-        &mut self,
-        data: &[u8],
-        base_index: u32,
-        _anchor: usize,
-        ip: usize,
-        value: u64,
-    ) -> Vec<Match> {
-        self.update(data, base_index, ip, value, true)
     }
 
     fn reset_indices(&mut self, old_base_index: u32) {

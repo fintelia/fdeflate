@@ -14,9 +14,8 @@ struct Slot {
     length: u8,
     distance: u16,
 
-    length2: u8,
-    distance2: u16,
-
+    // length2: u8,
+    // distance2: u16,
     cost: u32,
     chosen_length: u16,
 }
@@ -166,7 +165,7 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
             self.dist_costs[i] = 5 + DIST_SYM_TO_DIST_EXTRA[i];
         }
 
-        const OPT_WINDOW: usize = 100000;// 65536;
+        const OPT_WINDOW: usize = 65536; //100000;
 
         if data.len() >= 8 {
             let current = u64::from_le_bytes(data[..8].try_into().unwrap());
@@ -185,29 +184,41 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
             let mut i = block_start.max(1);
             while i < max_search_pos {
                 let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
-                if current as u32 == (current >> 8) as u32 && false {
-                    let mut length = 4;
+                // if current as u32 == (current >> 8) as u32 {
+                if (current ^ (current >> 8)) & 0xff_ffff_ffff_fffff == 0 {
+                    let mut length = 8;
                     if data[i - 1] != data[i] {
                         i += 1;
                         length -= 1;
                     }
-
                     // Find the match length.
                     while i + length < block_end && data[i + length] == data[i] {
                         length += 1;
                     }
-
                     // Store the matches.
-                    for j in 0..=(length - 3) {
+                    for j in 0..=(length - 3).min(block_end - i) {
                         let slot = &mut self.slots[i + j - block_start];
                         slot.length = (length - j - 3).min(255) as u8;
                         slot.distance = 1;
                     }
-
                     high_water_mark = high_water_mark.max(i + length);
-                    i += length - 2;
+                    i += length - 4;
                     continue;
                 }
+
+                let m = self
+                    .match_finder
+                    .get_and_insert(data, base_index, i, i, current);
+                if m.is_empty() {
+                    i += 1 + ((i.saturating_sub(high_water_mark)) >> self.skip_ahead_shift);
+                    continue;
+                }
+                let slot = &mut self.slots[i - block_start];
+                slot.length = (m.length - 3) as u8;
+                slot.distance = m.distance;
+                high_water_mark = high_water_mark.max(i + m.length as usize);
+                i += 1;
+                continue;
 
                 let ms = self
                     .match_finder
@@ -226,24 +237,24 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                 slot.length = (ms[last_match].length - 3) as u8;
                 slot.distance = ms[last_match].distance;
                 if ms.len() > 1 {
-                    slot.length2 = (ms[last_match - 1].length - 3) as u8;
-                    slot.distance2 = ms[last_match - 1].distance;
-                    assert!(slot.distance2 < slot.distance);
+                    // slot.length2 = (ms[last_match - 1].length - 3) as u8;
+                    // slot.distance2 = ms[last_match - 1].distance;
+                    // assert!(slot.distance2 < slot.distance);
                 }
 
                 high_water_mark = high_water_mark.max(i + 3 + slot.length as usize);
 
                 // if slot.length > 150 {
-                //     // //     let length = slot.length as usize + 3;
-                //     // //     let distance = slot.distance;
-                //     // //     for j in 0..(length - 10).min(block_end - i) {
-                //     // //         let slot = &mut self.slots[i + j as usize - block_start];
-                //     // //         slot.length = (length - j - 3).min(255) as u8;
-                //     // //         slot.distance = distance;
-                //     // //     }
+                //     //     let length = slot.length as usize + 3;
+                //     //     let distance = slot.distance;
+                //     //     for j in 0..(length - 10).min(block_end - i) {
+                //     //         let slot = &mut self.slots[i + j as usize - block_start];
+                //     //         slot.length = (length - j - 3).min(255) as u8;
+                //     //         slot.distance = distance;
+                //     //     }
                 //     i += slot.length as usize - 10;
                 // } else {
-                    i += 1;
+                i += 1;
                 // }
             }
 
@@ -280,7 +291,7 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                 );
             }
 
-            for passes_left in (0..4).rev() {
+            for passes_left in (0..2).rev() {
                 self.slots[block_length].cost = 0;
                 self.slots[block_length].chosen_length = 1;
 
@@ -299,27 +310,33 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                         let dist_sym = bitstream::distance_to_dist_sym(slot.distance);
                         let dist_cost = u32::from(self.dist_costs[dist_sym as usize]);
 
-                        let start = if slot.distance2 != 0 {
-                            let dist2_sym = bitstream::distance_to_dist_sym(slot.distance2);
-                            let dist2_cost = u32::from(self.dist_costs[dist2_sym as usize]);
+                        // let start = if slot.distance2 != 0 {
+                        //     let dist2_sym = bitstream::distance_to_dist_sym(slot.distance2);
+                        //     let dist2_cost = u32::from(self.dist_costs[dist2_sym as usize]);
 
-                            let length2 = (slot.length2 as usize + 3).min(block_length - j);
-                            for k in 3..=length2 {
-                                let cost = dist2_cost
-                                    + u32::from(self.costs[LENGTH_TO_SYMBOL[k - 3] as usize])
-                                    + self.slots[j + k].cost;
-                                if cost < best_cost {
-                                    best_length = k as u16;
-                                    best_cost = cost
-                                }
-                            }
+                        //     let length2 = (slot.length2 as usize + 3).min(block_length - j);
+                        //     for k in 3..=length2 {
+                        //         let cost = dist2_cost
+                        //             + u32::from(self.costs[LENGTH_TO_SYMBOL[k - 3] as usize])
+                        //             + self.slots[j + k].cost;
+                        //         if cost < best_cost {
+                        //             best_length = k as u16;
+                        //             best_cost = cost
+                        //         }
+                        //     }
 
-                            length2 + 1
-                        } else {
-                            3
-                        };
+                        //     length2 + 1
+                        // } else {
+                        //     3
+                        // };
 
                         let length = (slot.length as usize + 3).min(block_length - j);
+                        // let start = 3;
+                        let start = if length > 64 {
+                            length
+                        } else {
+                            3//length.saturating_sub(4).max(3)
+                        };
                         for k in start..=length {
                             let cost = dist_cost
                                 + u32::from(self.costs[LENGTH_TO_SYMBOL[k - 3] as usize])
@@ -336,7 +353,7 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                     }
                 }
 
-                if passes_left != 0 || true {
+                if passes_left != 0 {
                     let mut total_symbols = 0;
                     let mut total_backrefs = 0;
                     let mut frequencies = [0; 286];
@@ -384,12 +401,12 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                     continue;
                 }
 
-                let distance = if m.distance2 != 0 && m.chosen_length <= u16::from(m.length2) + 3 {
-                    m.distance2
-                } else {
-                    m.distance
-                };
-                // let distance = m.distance;
+                // let distance = if m.distance2 != 0 && m.chosen_length <= u16::from(m.length2) + 3 {
+                //     m.distance2
+                // } else {
+                //     m.distance
+                // };
+                let distance = m.distance;
                 assert!(distance > 0);
                 assert!(
                     (distance as usize) <= block_start + j,
@@ -421,7 +438,8 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                     m.chosen_length
                 );
                 if symbols.len() >= 16384 {
-                    let last_block = flush == Flush::Finish && block_start + j as usize == data.len();
+                    let last_block =
+                        flush == Flush::Finish && block_start + j as usize == data.len();
                     bitstream::write_block(writer, data, base_index, &symbols, last_block)?;
                     symbols.clear();
                 }
@@ -434,6 +452,12 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                     end: block_end as u32,
                 });
             }
+
+            // if !symbols.is_empty() {
+            //     let last_block = flush == Flush::Finish && block_end == data.len();
+            //     bitstream::write_block(writer, data, base_index, &symbols, last_block)?;
+            //     symbols.clear();
+            // }
         }
 
         if !symbols.is_empty() {

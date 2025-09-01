@@ -80,7 +80,7 @@ impl<W: Write> Compressor<W> {
             6 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 128, 128))),
             7 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 512, 258))),
             8 => Medium(GreedyParser::new(12, HashChainMatchFinder::new(4, 2048, 258))),
-            9.. => High(DynamicProgrammingParser::new(9, BinaryTreeMatchFinder::new(300))),
+            9.. => High(DynamicProgrammingParser::new(6, BinaryTreeMatchFinder::new(256))),
         };
 
         Ok(Self {
