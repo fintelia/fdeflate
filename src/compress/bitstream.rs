@@ -38,19 +38,13 @@ pub(crate) enum Symbol {
     },
 }
 
-pub(crate) struct BlockCodes {
-    pub lengths: [u8; 286],
-    pub codes: [u16; 286],
-
-    pub dist_lengths: [u8; 30],
-    pub dist_codes: [u16; 30],
-}
-
-pub(crate) fn compute_block_codes(
+pub(crate) fn write_block<W: Write>(
+    writer: &mut BitWriter<W>,
     data: &[u8],
     base_index: u32,
     symbols: &[Symbol],
-) -> BlockCodes {
+    eof: bool,
+) -> io::Result<()> {
     let mut frequencies = [0u32; 286];
     let mut dist_frequencies = [0u32; 30];
     frequencies[256] = 1;
@@ -95,40 +89,6 @@ pub(crate) fn compute_block_codes(
     let mut dist_lengths = [0u8; 30];
     let mut dist_codes = [0u16; 30];
     build_huffman_tree(&dist_frequencies, &mut dist_lengths, &mut dist_codes, 15);
-
-    BlockCodes {
-        lengths,
-        codes,
-        dist_lengths,
-        dist_codes,
-    }
-}
-
-pub(crate) fn write_block<W: Write>(
-    writer: &mut BitWriter<W>,
-    data: &[u8],
-    base_index: u32,
-    symbols: &[Symbol],
-    eof: bool,
-) -> io::Result<()> {
-    let codes = compute_block_codes(data, base_index, symbols);
-    write_block_inner(writer, data, base_index, symbols, eof, codes)
-}
-
-pub(crate) fn write_block_inner<W: Write>(
-    writer: &mut BitWriter<W>,
-    data: &[u8],
-    base_index: u32,
-    symbols: &[Symbol],
-    eof: bool,
-    codes: BlockCodes,
-) -> io::Result<()> {
-    let BlockCodes {
-        lengths,
-        codes,
-        dist_lengths,
-        dist_codes,
-    } = codes;
 
     let mut num_litlen_codes = 286;
     while num_litlen_codes > 257 && lengths[num_litlen_codes - 1] == 0 {

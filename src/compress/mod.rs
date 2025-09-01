@@ -13,8 +13,8 @@ use bitwriter::BitWriter;
 use matchfinder::{HashChainMatchFinder, HashTableMatchFinder};
 use parse::GreedyParser;
 
-use crate::compress::{matchfinder::BinaryTreeMatchFinder, parse::DynamicProgrammingParser};
 use crate::compress::parse::RleParser;
+use crate::compress::{matchfinder::BinaryTreeMatchFinder, parse::NearOptimalParser};
 
 const STORED_BLOCK_MAX_SIZE: usize = u16::MAX as usize;
 const WINDOW_SIZE: usize = 32768;
@@ -79,8 +79,8 @@ impl<W: Write> Compressor<W> {
             5 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 32, 64))),
             6 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 128, 128))),
             7 => Medium(GreedyParser::new(9, HashChainMatchFinder::new(4, 512, 258))),
-            8 => Medium(GreedyParser::new(12, HashChainMatchFinder::new(4, 2048, 258))),
-            9.. => High(DynamicProgrammingParser::new(6, BinaryTreeMatchFinder::new(256))),
+            8 => High(NearOptimalParser::new(6, BinaryTreeMatchFinder::new(32))),
+            9.. => High(NearOptimalParser::new(6, BinaryTreeMatchFinder::new(256))),
         };
 
         Ok(Self {
@@ -216,7 +216,7 @@ enum CompressorInner {
     Fast(GreedyParser<HashTableMatchFinder>),
     MediumFast(GreedyParser<HashChainMatchFinder<true>>),
     Medium(GreedyParser<HashChainMatchFinder>),
-    High(DynamicProgrammingParser<BinaryTreeMatchFinder>),
+    High(NearOptimalParser),
 }
 impl CompressorInner {
     fn compress<W: Write>(

@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use crate::{
     compress::{
         bitstream::{self, Symbol},
-        matchfinder::MatchFinder,
+        matchfinder::BinaryTreeMatchFinder,
         BitWriter, Flush,
     },
     tables::{DIST_SYM_TO_DIST_EXTRA, LENGTH_TO_SYMBOL, LEN_SYM_TO_LEN_EXTRA},
@@ -20,8 +20,8 @@ struct Slot {
     chosen_length: u16,
 }
 
-pub(crate) struct DynamicProgrammingParser<M> {
-    match_finder: M,
+pub(crate) struct NearOptimalParser {
+    match_finder: BinaryTreeMatchFinder,
     skip_ahead_shift: u8,
 
     // symbols: Vec<Symbol>,
@@ -38,8 +38,8 @@ pub(crate) struct DynamicProgrammingParser<M> {
     slots: Vec<Slot>,
 }
 
-impl<M: MatchFinder> DynamicProgrammingParser<M> {
-    pub fn new(skip_ahead_shift: u8, match_finder: M) -> Self {
+impl NearOptimalParser {
+    pub fn new(skip_ahead_shift: u8, match_finder: BinaryTreeMatchFinder) -> Self {
         Self {
             match_finder,
             skip_ahead_shift,
@@ -184,8 +184,7 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
             let mut i = block_start.max(1);
             while i < max_search_pos {
                 let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
-                // if current as u32 == (current >> 8) as u32 {
-                if (current ^ (current >> 8)) & 0xff_ffff_ffff_fffff == 0 {
+                if (current >> 8) == current & 0xff_ffff_ffff_fffff {
                     let mut length = 8;
                     if data[i - 1] != data[i] {
                         i += 1;
@@ -218,44 +217,6 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                 slot.distance = m.distance;
                 high_water_mark = high_water_mark.max(i + m.length as usize);
                 i += 1;
-                continue;
-
-                let ms = self
-                    .match_finder
-                    .get_all_and_insert(data, base_index, i, i, current);
-
-                if ms.is_empty() {
-                    i += 1 + ((i.saturating_sub(high_water_mark)) >> self.skip_ahead_shift);
-                    continue;
-                }
-
-                let last_match = ms.len() - 1;
-                let slot = &mut self.slots[i - block_start];
-
-                assert!(ms[last_match].length >= 3);
-
-                slot.length = (ms[last_match].length - 3) as u8;
-                slot.distance = ms[last_match].distance;
-                if ms.len() > 1 {
-                    // slot.length2 = (ms[last_match - 1].length - 3) as u8;
-                    // slot.distance2 = ms[last_match - 1].distance;
-                    // assert!(slot.distance2 < slot.distance);
-                }
-
-                high_water_mark = high_water_mark.max(i + 3 + slot.length as usize);
-
-                // if slot.length > 150 {
-                //     //     let length = slot.length as usize + 3;
-                //     //     let distance = slot.distance;
-                //     //     for j in 0..(length - 10).min(block_end - i) {
-                //     //         let slot = &mut self.slots[i + j as usize - block_start];
-                //     //         slot.length = (length - j - 3).min(255) as u8;
-                //     //         slot.distance = distance;
-                //     //     }
-                //     i += slot.length as usize - 10;
-                // } else {
-                i += 1;
-                // }
             }
 
             // If necessary, do a greedy pass to estimate the frequencies of symbols.
@@ -335,7 +296,7 @@ impl<M: MatchFinder> DynamicProgrammingParser<M> {
                         let start = if length > 64 {
                             length
                         } else {
-                            3//length.saturating_sub(4).max(3)
+                            3 //length.saturating_sub(4).max(3)
                         };
                         for k in start..=length {
                             let cost = dist_cost

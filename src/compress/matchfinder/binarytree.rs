@@ -1,5 +1,5 @@
 use crate::compress::{
-    matchfinder::{Match, MatchFinder},
+    matchfinder::{Match},
     WINDOW_SIZE,
 };
 
@@ -7,7 +7,7 @@ const CACHE_SIZE: usize = 1 << 16;
 
 /// Find the length of the match between the current position and the previous position, searching
 /// both forwards and backwards from the starting position.
-fn match_length(data: &[u8], ip: usize, prev_index: usize) -> u16 {
+fn _match_length(data: &[u8], ip: usize, prev_index: usize) -> u16 {
     assert!(
         prev_index < ip,
         "Match past current position: {prev_index} {ip}"
@@ -151,9 +151,8 @@ impl BinaryTreeMatchFinder {
 
         Match::empty()
     }
-}
-impl MatchFinder for BinaryTreeMatchFinder {
-    fn get_and_insert(
+
+    pub(crate) fn get_and_insert(
         &mut self,
         data: &[u8],
         base_index: u32,
@@ -164,7 +163,7 @@ impl MatchFinder for BinaryTreeMatchFinder {
         self.update(data, base_index, ip, value, true)
     }
 
-    fn insert(&mut self, data: &[u8], base_index: u32, value: u64, offset: u32) {
+    pub(crate) fn insert(&mut self, data: &[u8], base_index: u32, value: u64, offset: u32) {
         self.update(
             data,
             base_index,
@@ -174,7 +173,7 @@ impl MatchFinder for BinaryTreeMatchFinder {
         );
     }
 
-    fn reset_indices(&mut self, old_base_index: u32) {
+    pub(crate) fn reset_indices(&mut self, old_base_index: u32) {
         for v in &mut *self.hash_table {
             *v = v.saturating_sub(old_base_index);
         }
