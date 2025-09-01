@@ -190,11 +190,14 @@ impl NearOptimalParser {
             let mut i = block_start.max(1);
             while i < max_search_pos {
                 let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
-                if (current >> 8) == current & 0xff_ffff_ffff_fffff {
+                if (current >> 8) == (current & 0xff_ffff_ffff_ffff) {
                     let mut length = 8;
                     if data[i - 1] != data[i] {
                         i += 1;
                         length -= 1;
+                        if i == max_search_pos {
+                            break;
+                        }
                     }
                     // Find the match length.
                     while i + length < block_end && data[i + length] == data[i] {
