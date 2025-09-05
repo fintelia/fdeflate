@@ -38,6 +38,11 @@ impl Match {
     }
 }
 
+pub(crate) struct PackedMatch {
+    pub length: u16,
+    pub distance: u16,
+}
+
 pub(crate) trait MatchFinder {
     fn get_and_insert(
         &mut self,
