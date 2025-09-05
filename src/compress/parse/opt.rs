@@ -215,7 +215,7 @@ impl NearOptimalParser {
                 );
 
                 if n == 0 {
-                    i += 1 ;//+ ((i.saturating_sub(high_water_mark)) >> self.skip_ahead_shift);
+                    i += 1 + ((i.saturating_sub(high_water_mark)) >> self.skip_ahead_shift);
                     continue;
                 }
 
