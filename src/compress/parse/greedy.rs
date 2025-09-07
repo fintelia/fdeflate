@@ -185,7 +185,7 @@ impl<M: MatchFinder> GreedyParser<M> {
             self.m = m2;
 
             // Write the block if we have enough symbols.
-            if self.symbols.len() >= 16384 {
+            if self.symbols.len() >= 16384/2 {
                 let last_block = flush == Flush::Finish && self.last_match == data.len();
                 bitstream::write_block(writer, data, base_index, &self.symbols, last_block)?;
                 self.symbols.clear();

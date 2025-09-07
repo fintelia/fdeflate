@@ -100,13 +100,51 @@ pub(crate) fn write_block<W: Write>(
         num_dist_codes -= 1;
     }
 
+    let mut merged_lengths = Vec::new();
+    merged_lengths.extend_from_slice(&lengths[..num_litlen_codes]);
+    merged_lengths.extend_from_slice(&dist_lengths[..num_dist_codes]);
+
     let mut code_length_frequencies = [0u32; 19];
-    for &length in &lengths[..num_litlen_codes] {
-        code_length_frequencies[length as usize] += 1;
+    // for &length in &lengths[..num_litlen_codes] {
+    //     code_length_frequencies[length as usize] += 1;
+    // }
+    // for &length in &dist_lengths[..num_dist_codes] {
+    //     code_length_frequencies[length as usize] += 1;
+    // }
+
+    let mut run_start = 0;
+    while run_start < merged_lengths.len() {
+        let length = merged_lengths[run_start];
+
+        let mut run_length = 1;
+        while run_start + run_length < merged_lengths.len()
+            && merged_lengths[run_start + run_length] == length
+        {
+            run_length += 1;
+        }
+        run_start += run_length;
+
+        if length == 0 {
+            while run_length >= 11 {
+                code_length_frequencies[18] += 1;
+                run_length = run_length.saturating_sub(138);
+            }
+            if run_length >= 3 {
+                code_length_frequencies[17] += 1;
+                run_length = run_length.saturating_sub(10);
+            }
+        } else if run_length >= 4 {
+            code_length_frequencies[length as usize] += 1;
+            run_length -= 1;
+            while run_length >= 3 {
+                code_length_frequencies[16] += 1;
+                run_length = run_length.saturating_sub(6);
+            }
+        }
+
+        code_length_frequencies[length as usize] += run_length as u32;
     }
-    for &length in &dist_lengths[..num_dist_codes] {
-        code_length_frequencies[length as usize] += 1;
-    }
+
     let mut code_length_lengths = [0u8; 19];
     let mut code_length_codes = [0u16; 19];
     build_huffman_tree(
@@ -130,14 +168,61 @@ pub(crate) fn write_block<W: Write>(
         writer.write_bits(code_length_lengths[CLCL_ORDER[j]] as u64, 3)?;
     }
 
-    for &length in lengths[..num_litlen_codes]
-        .iter()
-        .chain(&dist_lengths[..num_dist_codes])
-    {
-        writer.write_bits(
-            code_length_codes[length as usize] as u64,
-            code_length_lengths[length as usize],
-        )?;
+    // for &length in lengths[..num_litlen_codes]
+    //     .iter()
+    //     .chain(&dist_lengths[..num_dist_codes])
+    // {
+    //     writer.write_bits(
+    //         code_length_codes[length as usize] as u64,
+    //         code_length_lengths[length as usize],
+    //     )?;
+    // }
+
+    let mut run_start = 0;
+    while run_start < merged_lengths.len() {
+        let length = merged_lengths[run_start];
+
+        let mut run_length = 1;
+        while run_start + run_length < merged_lengths.len()
+            && merged_lengths[run_start + run_length] == length
+        {
+            run_length += 1;
+        }
+        run_start += run_length;
+
+        if length == 0 {
+            while run_length >= 11 {
+                let extra_bits = (run_length - 11).min(127);
+                writer.write_bits(code_length_codes[18] as u64, code_length_lengths[18])?;
+                writer.write_bits(extra_bits as u64, 7)?;
+                run_length = run_length.saturating_sub(138);
+            }
+            if run_length >= 3 {
+                let extra_bits = (run_length - 3).min(7);
+                writer.write_bits(code_length_codes[17] as u64, code_length_lengths[17])?;
+                writer.write_bits(extra_bits as u64, 3)?;
+                run_length = run_length.saturating_sub(10);
+            }
+        } else if run_length >= 4 {
+            writer.write_bits(
+                code_length_codes[length as usize] as u64,
+                code_length_lengths[length as usize],
+            )?;
+            run_length -= 1;
+            while run_length >= 3 {
+                let extra_bits = (run_length - 3).min(3);
+                writer.write_bits(code_length_codes[16] as u64, code_length_lengths[16])?;
+                writer.write_bits(extra_bits as u64, 2)?;
+                run_length = run_length.saturating_sub(6);
+            }
+        }
+
+        for _ in 0..run_length {
+            writer.write_bits(
+                code_length_codes[length as usize] as u64,
+                code_length_lengths[length as usize],
+            )?;
+        }
     }
 
     for symbol in symbols {
@@ -195,7 +280,7 @@ pub(crate) fn write_block<W: Write>(
     Ok(())
 }
 
-fn build_huffman_tree(
+pub fn build_huffman_tree(
     frequencies: &[u32],
     lengths: &mut [u8],
     codes: &mut [u16],

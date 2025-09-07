@@ -1,4 +1,7 @@
-use crate::compress::{matchfinder::PackedMatch, WINDOW_SIZE};
+use crate::compress::{
+    matchfinder::{self, PackedMatch},
+    WINDOW_SIZE,
+};
 
 const CACHE_SIZE: usize = 1 << 16;
 
@@ -36,7 +39,7 @@ pub(crate) struct BinaryTreeMatchFinder {
     early_return_length: usize,
 }
 impl BinaryTreeMatchFinder {
-    pub(crate) fn new(search_depth: u16) -> Self {
+    pub(crate) fn new(search_depth: u16, nice_length: u16) -> Self {
         Self {
             hash_table: vec![0; CACHE_SIZE].into_boxed_slice().try_into().unwrap(),
             child_links: vec![0; WINDOW_SIZE * 2]
@@ -44,7 +47,7 @@ impl BinaryTreeMatchFinder {
                 .try_into()
                 .unwrap(),
             search_depth,
-            early_return_length: 258,
+            early_return_length: nice_length as usize,
         }
     }
 
@@ -66,7 +69,7 @@ impl BinaryTreeMatchFinder {
         let hash = super::compute_hash(value & 0xffff_ffff);
         let hash_index = (hash as usize) % CACHE_SIZE;
         let mut offset = self.hash_table[hash_index];
-        self.hash_table[hash_index] = ip as u32;
+        self.hash_table[hash_index] = ip as u32 + base_index;
 
         let mut pending_left = left_child(ip as u32 + base_index);
         let mut pending_right = right_child(ip as u32 + base_index);
@@ -81,40 +84,24 @@ impl BinaryTreeMatchFinder {
         let mut best_right_length = 0;
         let mut length = 0;
 
+        // let data = &data[..ip + 258.min(data.len() - ip)];
+
         // let max_length = (data.len() - ip).min(258);
 
         // Visit previous matches
         let mut depth_remaining = self.search_depth;
         loop {
             if data[ip + length] == data[(offset - base_index) as usize + length] {
-                // while length + 8 <= max_length {
-                //     if data[ip + length..][..8]
-                //         == data[(offset - base_index) as usize + length..][..8]
-                //     {
-                //         length += 8;
-                //     } else {
-                //         break;
-                //     }
-                // }
-
-                while length < 258
-                    && ip + length < data.len()
-                    && data[ip + length] == data[(offset - base_index) as usize + length]
-                {
-                    length += 1;
-                }
+                //length += 1;
+                length += matchfinder::extend_match(
+                    data,
+                    ip + length,
+                    (offset - base_index) as usize + length,
+                ) as usize;
 
                 if record_matches && length > best_length as usize {
-                    best_length = length as u16;
-
-                    if num_matches <= 1 {
-                        num_matches += 1;
-                    } else {
-                        let l = found_matches.pop();
-                        found_matches.pop();
-                        found_matches.push(l.unwrap());
-                    }
-
+                    best_length = length.min(258) as u16;
+                    num_matches += 1;
                     found_matches.push(PackedMatch {
                         length: best_length,
                         distance: (ip - (offset - base_index) as usize) as u16,
@@ -177,15 +164,8 @@ impl BinaryTreeMatchFinder {
         self.update(data, base_index, ip, value, true, found_matches)
     }
 
-    pub(crate) fn insert(&mut self, data: &[u8], base_index: u32, value: u64, offset: u32) {
-        self.update(
-            data,
-            base_index,
-            (offset - base_index) as usize,
-            value,
-            false,
-            &mut Vec::new(),
-        );
+    pub(crate) fn insert(&mut self, data: &[u8], base_index: u32, ip: usize, value: u64) {
+        self.update(data, base_index, ip, value, false, &mut Vec::new());
     }
 
     pub(crate) fn reset_indices(&mut self, old_base_index: u32) {
