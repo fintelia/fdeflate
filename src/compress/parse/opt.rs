@@ -22,6 +22,8 @@ struct Slot {
 pub(crate) struct NearOptimalParser {
     match_finder: BinaryTreeMatchFinder,
     skip_ahead_shift: u8,
+    nice_length: usize,
+    iters: u8,
 
     // symbols: Vec<Symbol>,
     last_index: u32,
@@ -38,10 +40,12 @@ pub(crate) struct NearOptimalParser {
 }
 
 impl NearOptimalParser {
-    pub fn new(skip_ahead_shift: u8, match_finder: BinaryTreeMatchFinder) -> Self {
+    pub fn new(skip_ahead_shift: u8, iters: u8, search_depth: u16, nice_length: u16) -> Self {
         Self {
-            match_finder,
+            match_finder: BinaryTreeMatchFinder::new(search_depth, nice_length),
             skip_ahead_shift,
+            nice_length: nice_length as usize,
+            iters,
             // symbols: Vec::new(),
             // ip: 0,
             // last_match: 0,
@@ -206,7 +210,7 @@ impl NearOptimalParser {
 
         const OPT_WINDOW: usize = 65536;
 
-        if data.len() >= 8 {
+        if data.len() >= 8 && base_index == 0 {
             let current = u64::from_le_bytes(data[..8].try_into().unwrap());
             self.match_finder.insert(data, base_index, 0, current);
         }
@@ -248,7 +252,7 @@ impl NearOptimalParser {
                 high_water_mark = high_water_mark.max(i + max_len);
                 i += 1;
 
-                if max_len >= 75 {
+                if max_len >= self.nice_length {
                     let end_index = (i + max_len).min(max_search_pos) - 1;
                     while i < end_index {
                         let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
@@ -259,7 +263,7 @@ impl NearOptimalParser {
             }
 
             let mut best_total_cost = u32::MAX;
-            for _passes_left in (0..2).rev() {
+            for _ in 0..self.iters {
                 self.slots[block_length].cost = 0;
                 self.slots[block_length].chosen_length = 1;
 
