@@ -4,6 +4,7 @@ use crate::compress::{
 };
 
 const CACHE_SIZE: usize = 1 << 16;
+const CACHE3_SIZE: usize = 1 << 16;
 
 /// Find the length of the match between the current position and the previous position, searching
 /// both forwards and backwards from the starting position.
@@ -33,6 +34,7 @@ fn right_child(index: u32) -> usize {
 ///
 /// Based on bt_matchfinder.h from libdeflate.
 pub(crate) struct BinaryTreeMatchFinder {
+    hash3_table: Box<[u32; CACHE3_SIZE]>,
     hash_table: Box<[u32; CACHE_SIZE]>,
     child_links: Box<[u32; WINDOW_SIZE * 2]>,
     search_depth: u16,
@@ -41,6 +43,7 @@ pub(crate) struct BinaryTreeMatchFinder {
 impl BinaryTreeMatchFinder {
     pub(crate) fn new(search_depth: u16, nice_length: u16) -> Self {
         Self {
+            hash3_table: vec![0; CACHE3_SIZE].into_boxed_slice().try_into().unwrap(),
             hash_table: vec![0; CACHE_SIZE].into_boxed_slice().try_into().unwrap(),
             child_links: vec![0; WINDOW_SIZE * 2]
                 .into_boxed_slice()
@@ -71,13 +74,34 @@ impl BinaryTreeMatchFinder {
         let mut offset = self.hash_table[hash_index];
         self.hash_table[hash_index] = ip as u32 + base_index;
 
+        // Look for 3-byte match
+        let hash3 = super::compute_hash(value & 0xff_ffff);
+        let hash3_index = (hash3 as usize) % CACHE3_SIZE;
+        let offset3 = self.hash3_table[hash3_index];
+        self.hash3_table[hash3_index] = ip as u32 + base_index;
+
+        if record_matches && offset3 >= min_offset && offset3 != offset {
+            let prev = u32::from_le_bytes(
+                data[(offset3 - base_index) as usize..][..4]
+                    .try_into()
+                    .unwrap(),
+            );
+            if ((value as u32) ^ prev) & 0xffffff == 0 {
+                num_matches = 1;
+                found_matches.push(PackedMatch {
+                    length: 3,
+                    distance: (ip - (offset3 - base_index) as usize) as u16,
+                });
+            }
+        }
+
         let mut pending_left = left_child(ip as u32 + base_index);
         let mut pending_right = right_child(ip as u32 + base_index);
 
         if offset < min_offset {
             self.child_links[pending_left] = 0;
             self.child_links[pending_right] = 0;
-            return 0;
+            return num_matches;
         }
 
         let mut best_left_length = 0;
@@ -100,6 +124,11 @@ impl BinaryTreeMatchFinder {
                 ) as usize;
 
                 if record_matches && length > best_length as usize {
+                    if num_matches == 255 {
+                        found_matches.pop().unwrap();
+                        num_matches -= 1;
+                    }
+
                     best_length = length.min(258) as u16;
                     num_matches += 1;
                     found_matches.push(PackedMatch {
@@ -169,6 +198,10 @@ impl BinaryTreeMatchFinder {
     }
 
     pub(crate) fn reset_indices(&mut self, old_base_index: u32) {
+        for v in &mut *self.hash3_table {
+            *v = v.saturating_sub(old_base_index);
+        }
+
         for v in &mut *self.hash_table {
             *v = v.saturating_sub(old_base_index);
         }
