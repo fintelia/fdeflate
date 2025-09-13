@@ -129,29 +129,27 @@ fn match_length<const MIN_MATCH8: bool>(
 }
 
 fn extend_match(data: &[u8], ip: usize, prev_index: usize) -> usize {
-    // Search forwards to find the full length of the match.
     let mut length = 0;
-    'fsearch: {
-        let slice_length = (data.len() - ip - length).min(258 - length);
-        let mut chunks = data[ip + length..][..slice_length].chunks_exact(8);
-        let mut prev_chunks = data[prev_index + length..][..slice_length].chunks_exact(8);
 
-        for (chunk, prev_chunk) in (&mut chunks).zip(&mut prev_chunks) {
-            if chunk == prev_chunk {
-                length += 8;
-            } else {
-                let chunk = u64::from_ne_bytes(chunk.try_into().unwrap());
-                let prev_chunk = u64::from_ne_bytes(prev_chunk.try_into().unwrap());
-                length += (chunk ^ prev_chunk).trailing_zeros() as usize / 8;
-                break 'fsearch; // skip the remainder loop below
-            }
+    let slice_length = (data.len() - ip - length).min(258 - length);
+    let mut chunks = data[ip + length..][..slice_length].chunks_exact(8);
+    let mut prev_chunks = data[prev_index + length..][..slice_length].chunks_exact(8);
+
+    for (chunk, prev_chunk) in (&mut chunks).zip(&mut prev_chunks) {
+        if chunk == prev_chunk {
+            length += 8;
+        } else {
+            let chunk = u64::from_ne_bytes(chunk.try_into().unwrap());
+            let prev_chunk = u64::from_ne_bytes(prev_chunk.try_into().unwrap());
+            length += (chunk ^ prev_chunk).trailing_zeros() as usize / 8;
+            return length;
         }
-        for (chunk, prev_chunk) in chunks.remainder().iter().zip(prev_chunks.remainder()) {
-            if *chunk != *prev_chunk {
-                break;
-            }
-            length += 1;
+    }
+    for (chunk, prev_chunk) in chunks.remainder().iter().zip(prev_chunks.remainder()) {
+        if *chunk != *prev_chunk {
+            break;
         }
+        length += 1;
     }
 
     length
