@@ -152,31 +152,7 @@ impl NearOptimalParser {
         total_cost
     }
 
-    /// Compress the data using a greedy algorithm.
-    pub fn compress<W: Write>(
-        &mut self,
-        writer: &mut BitWriter<W>,
-        data: &[u8],
-        base_index: u32,
-        _start: usize,
-        flush: Flush,
-    ) -> io::Result<usize> {
-        assert!(base_index as u64 + data.len() as u64 <= u32::MAX as u64);
-
-        if flush == Flush::None {
-            return Ok(0);
-        }
-
-        if self.distance_to_sym.is_empty() {
-            self.distance_to_sym.push(0);
-        }
-        for i in self.distance_to_sym.len()..data.len().min(32769) {
-            self.distance_to_sym
-                .push(bitstream::distance_to_dist_sym(i as u16));
-        }
-
-        let mut symbols = Vec::new();
-
+    fn initialize_costs(&mut self, data: &[u8]) {
         // Measure the literal distribution in the first 4KB.
         let lookahead = data.len().min(4096);
         let mut lit_freqs = [[0u16; 256]; 4];
@@ -207,8 +183,212 @@ impl NearOptimalParser {
         for i in 0..30 {
             self.dist_costs[i] = 5 + DIST_SYM_TO_DIST_EXTRA[i];
         }
+    }
 
-        const OPT_WINDOW: usize = 65536;
+    fn populate_matches(&mut self, data: &[u8], base_index: u32, block_start: usize, block_length: usize) {
+        self.found_matches.clear();
+        self.found_matches.push(PackedMatch {
+            length: 0,
+            distance: 0,
+        });
+
+        let mut high_water_mark = block_start + 1;
+        let max_search_pos = (block_start + block_length).min(data.len().saturating_sub(8));
+        let mut i = block_start.max(1);
+        while i < max_search_pos {
+            let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
+            let n = self.match_finder.get_and_insert(
+                &mut self.found_matches,
+                data,
+                base_index,
+                i,
+                current,
+            );
+
+            if n == 0 {
+                i += 1 + ((i.saturating_sub(high_water_mark)) >> self.skip_ahead_shift);
+                continue;
+            }
+
+            assert_eq!(self.slots[i - block_start].num_matches, 0);
+            self.slots[i - block_start].num_matches = n as u8;
+            let max_len = self.found_matches.last().unwrap().length as usize;
+            high_water_mark = high_water_mark.max(i + max_len);
+            i += 1;
+
+            if max_len >= self.nice_length {
+                let end_index = (i + max_len).min(max_search_pos) - 1;
+                while i < end_index {
+                    let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
+                    self.match_finder.insert(data, base_index, i, current);
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    fn optimize_block(&mut self, data: &[u8], block_start: usize, block_length: usize) -> u32 {
+        self.slots[block_length].cost = 0;
+        self.slots[block_length].chosen_length = 1;
+
+        let mut match_index = self.found_matches.len() - 1;
+        for j in (0..block_length).rev() {
+            let lit_cost =
+                u32::from(self.costs[data[block_start + j] as usize]) + self.slots[j + 1].cost;
+            let slot = &self.slots[j];
+
+            if slot.num_matches == 0 {
+                self.slots[j].cost = lit_cost;
+                self.slots[j].chosen_length = 1;
+            } else {
+                let mut best_length = 1;
+                let mut best_distance = 0;
+                let mut best_cost = lit_cost;
+
+                let mut length = 3;
+                let mut index = match_index + 1 - slot.num_matches as usize;
+                while index <= match_index {
+                    let distance = self.found_matches[index].distance as usize;
+                    let dist_sym = self.distance_to_sym[distance] as usize;
+                    let dist_cost = u32::from(self.dist_costs[dist_sym]);
+
+                    while length <= self.found_matches[index].length as usize
+                        && length <= block_length - j
+                    {
+                        let cost = dist_cost
+                            + u32::from(self.length_costs[length])
+                            + self.slots[j + length].cost;
+
+                        if cost < best_cost {
+                            best_length = length as u16;
+                            best_distance = distance as u16;
+                            best_cost = cost;
+                        }
+                        length += 1;
+                    }
+                    index += 1;
+                }
+
+                match_index -= slot.num_matches as usize;
+                self.slots[j].cost = best_cost;
+                self.slots[j].chosen_length = best_length;
+                self.slots[j].chosen_distance = best_distance;
+                assert!(j + best_length as usize <= block_length);
+                assert!(best_distance as usize <= block_start + j as usize)
+            }
+        }
+
+        let mut _total_symbols = 0;
+        let mut _total_backrefs = 0;
+        let mut frequencies = [0; 286];
+        let mut dist_frequencies = [0; 30];
+
+        frequencies[256] = 1; // EOF symbol
+
+        let mut i = 0;
+        while i < block_length {
+            let m = &self.slots[i];
+            if m.chosen_length != 1 {
+                frequencies[LENGTH_TO_SYMBOL[m.chosen_length as usize - 3] as usize] += 1;
+                dist_frequencies[self.distance_to_sym[m.chosen_distance as usize] as usize] += 1;
+                i += m.chosen_length as usize;
+                _total_backrefs += 1;
+            } else {
+                frequencies[data[block_start + i] as usize] += 1;
+                i += 1;
+            }
+            _total_symbols += 1;
+        }
+
+        // let total_cost = self.compute_costs(
+        //     &frequencies,
+        //     &dist_frequencies,
+        //     total_symbols,
+        //     total_backrefs,
+        // );
+        self.compute_true_costs(&frequencies, &dist_frequencies)
+    }
+
+    fn convert_to_symbols(
+        &mut self,
+        data: &[u8],
+        block_start: usize,
+        block_length: usize,
+    ) -> Vec<Symbol> {
+        let mut symbols = Vec::new();
+
+        let mut j = 0;
+        let mut symbol_run = 0;
+        while j < block_length {
+            let m = &self.slots[j];
+            assert!(j + m.chosen_length as usize <= block_length);
+            assert!(m.chosen_length != 0);
+            if m.chosen_length == 1 {
+                symbol_run += 1;
+                j += 1;
+                assert!(j as usize <= block_length);
+                continue;
+            }
+
+            let distance = m.chosen_distance;
+            assert!(distance > 0);
+            assert!((distance as usize) <= block_start + j,);
+
+            if symbol_run > 0 {
+                symbols.push(Symbol::LiteralRun {
+                    start: (block_start + j - symbol_run) as u32,
+                    end: (block_start + j) as u32,
+                });
+                symbol_run = 0;
+            }
+
+            symbols.push(Symbol::Backref {
+                length: m.chosen_length,
+                distance,
+                dist_sym: self.distance_to_sym[distance as usize],
+            });
+            j += m.chosen_length as usize;
+
+            assert!(j as usize <= block_length,);
+        }
+        assert_eq!(j as usize, block_length);
+
+        if symbol_run > 0 {
+            symbols.push(Symbol::LiteralRun {
+                start: (block_start + block_length - symbol_run) as u32,
+                end: (block_start + block_length) as u32,
+            });
+        }
+
+        symbols
+    }
+
+    /// Compress the data using a greedy algorithm.
+    pub fn compress<W: Write>(
+        &mut self,
+        writer: &mut BitWriter<W>,
+        data: &[u8],
+        base_index: u32,
+        _start: usize,
+        flush: Flush,
+    ) -> io::Result<usize> {
+        assert!(base_index as u64 + data.len() as u64 <= u32::MAX as u64);
+
+        if flush == Flush::None {
+            return Ok(0);
+        }
+
+        if self.distance_to_sym.is_empty() {
+            self.distance_to_sym.push(0);
+        }
+        for i in self.distance_to_sym.len()..data.len().min(32769) {
+            self.distance_to_sym
+                .push(bitstream::distance_to_dist_sym(i as u16));
+        }
+
+        self.initialize_costs(data);
+
+        const OPT_WINDOW: usize = 65536 * 2;
 
         if data.len() >= 8 && base_index == 0 {
             let current = u64::from_le_bytes(data[..8].try_into().unwrap());
@@ -221,129 +401,11 @@ impl NearOptimalParser {
 
             self.slots = vec![Slot::default(); block_length + 1];
 
-            self.found_matches.clear();
-            self.found_matches.push(PackedMatch {
-                length: 0,
-                distance: 0,
-            });
-
-            let mut high_water_mark = block_start + 1;
-
-            let max_search_pos = block_end.min(data.len().saturating_sub(8));
-            let mut i = block_start.max(1);
-            while i < max_search_pos {
-                let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
-                let n = self.match_finder.get_and_insert(
-                    &mut self.found_matches,
-                    data,
-                    base_index,
-                    i,
-                    current,
-                );
-
-                if n == 0 {
-                    i += 1 + ((i.saturating_sub(high_water_mark)) >> self.skip_ahead_shift);
-                    continue;
-                }
-
-                assert_eq!(self.slots[i - block_start].num_matches, 0);
-                self.slots[i - block_start].num_matches = n as u8;
-                let max_len = self.found_matches.last().unwrap().length as usize;
-                high_water_mark = high_water_mark.max(i + max_len);
-                i += 1;
-
-                if max_len >= self.nice_length {
-                    let end_index = (i + max_len).min(max_search_pos) - 1;
-                    while i < end_index {
-                        let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
-                        self.match_finder.insert(data, base_index, i, current);
-                        i += 1;
-                    }
-                }
-            }
+            self.populate_matches(data, base_index, block_start, block_length);
 
             let mut best_total_cost = u32::MAX;
             for _ in 0..self.iters {
-                self.slots[block_length].cost = 0;
-                self.slots[block_length].chosen_length = 1;
-
-                let mut match_index = self.found_matches.len() - 1;
-                for j in (0..block_length).rev() {
-                    let lit_cost = u32::from(self.costs[data[block_start + j] as usize])
-                        + self.slots[j + 1].cost;
-                    let slot = &self.slots[j];
-
-                    if slot.num_matches == 0 {
-                        self.slots[j].cost = lit_cost;
-                        self.slots[j].chosen_length = 1;
-                    } else {
-                        let mut best_length = 1;
-                        let mut best_distance = 0;
-                        let mut best_cost = lit_cost;
-
-                        let mut length = 3;
-                        let mut index = match_index + 1 - slot.num_matches as usize;
-                        while index <= match_index {
-                            let distance = self.found_matches[index].distance as usize;
-                            let dist_sym = self.distance_to_sym[distance] as usize;
-                            let dist_cost = u32::from(self.dist_costs[dist_sym]);
-
-                            while length <= self.found_matches[index].length as usize
-                                && length <= block_length - j
-                            {
-                                let cost = dist_cost
-                                    + u32::from(self.length_costs[length])
-                                    + self.slots[j + length].cost;
-
-                                if cost < best_cost {
-                                    best_length = length as u16;
-                                    best_distance = distance as u16;
-                                    best_cost = cost;
-                                }
-                                length += 1;
-                            }
-                            index += 1;
-                        }
-
-                        match_index -= slot.num_matches as usize;
-                        self.slots[j].cost = best_cost;
-                        self.slots[j].chosen_length = best_length;
-                        self.slots[j].chosen_distance = best_distance;
-                        assert!(j + best_length as usize <= block_length);
-                        assert!(best_distance as usize <= block_start + j as usize)
-                    }
-                }
-
-                let mut _total_symbols = 0;
-                let mut _total_backrefs = 0;
-                let mut frequencies = [0; 286];
-                let mut dist_frequencies = [0; 30];
-
-                frequencies[256] = 1; // EOF symbol
-
-                let mut i = 0;
-                while i < block_length {
-                    let m = &self.slots[i];
-                    if m.chosen_length != 1 {
-                        frequencies[LENGTH_TO_SYMBOL[m.chosen_length as usize - 3] as usize] += 1;
-                        dist_frequencies
-                            [self.distance_to_sym[m.chosen_distance as usize] as usize] += 1;
-                        i += m.chosen_length as usize;
-                        _total_backrefs += 1;
-                    } else {
-                        frequencies[data[block_start + i] as usize] += 1;
-                        i += 1;
-                    }
-                    _total_symbols += 1;
-                }
-
-                // let total_cost = self.compute_costs(
-                //     &frequencies,
-                //     &dist_frequencies,
-                //     total_symbols,
-                //     total_backrefs,
-                // );
-                let total_cost = self.compute_true_costs(&frequencies, &dist_frequencies);
+                let total_cost = self.optimize_block(data, block_start, block_length);
                 if total_cost >= best_total_cost {
                     break;
                 }
@@ -351,58 +413,12 @@ impl NearOptimalParser {
             }
 
             // And convert to symbols in the forward direction.
-            let mut j = 0;
-            let mut symbol_run = 0;
-            while j < block_length {
-                let m = &self.slots[j];
-                assert!(j + m.chosen_length as usize <= block_length);
-                assert!(m.chosen_length != 0);
-                if m.chosen_length == 1 {
-                    symbol_run += 1;
-                    j += 1;
-                    assert!(j as usize <= block_length);
-                    continue;
-                }
-
-                let distance = m.chosen_distance;
-                assert!(distance > 0);
-                assert!((distance as usize) <= block_start + j,);
-
-                if symbol_run > 0 {
-                    symbols.push(Symbol::LiteralRun {
-                        start: (block_start + j - symbol_run) as u32,
-                        end: (block_start + j) as u32,
-                    });
-                    symbol_run = 0;
-                }
-
-                symbols.push(Symbol::Backref {
-                    length: m.chosen_length,
-                    distance,
-                    dist_sym: self.distance_to_sym[distance as usize],
-                });
-                j += m.chosen_length as usize;
-
-                assert!(j as usize <= block_length,);
-            }
-            assert_eq!(j as usize, block_length);
-
-            if symbol_run > 0 {
-                symbols.push(Symbol::LiteralRun {
-                    start: (block_end - symbol_run) as u32,
-                    end: block_end as u32,
-                });
-            }
+            let symbols = self.convert_to_symbols(data, block_start, block_length);
 
             if !symbols.is_empty() {
-                let last_block = flush == Flush::Finish && block_start + j as usize == data.len();
+                let last_block = flush == Flush::Finish && block_end == data.len();
                 bitstream::write_block(writer, data, base_index, &symbols, last_block)?;
-                symbols.clear();
             }
-        }
-
-        if !symbols.is_empty() {
-            bitstream::write_block(writer, data, base_index, &symbols, flush == Flush::Finish)?;
         }
 
         Ok(data.len())
