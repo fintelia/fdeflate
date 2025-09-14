@@ -59,7 +59,7 @@ impl BinaryTreeMatchFinder {
         data: &[u8],
         base_index: u32,
         ip: usize,
-        value: u64,
+        value: u32,
         record_matches: bool,
         found_matches: &mut Vec<PackedMatch>,
     ) -> usize {
@@ -69,13 +69,13 @@ impl BinaryTreeMatchFinder {
         let mut best_length = 3;
 
         // Lookup current value
-        let hash = super::compute_hash(value & 0xffff_ffff);
+        let hash = super::compute_hash(value as u64);
         let hash_index = (hash as usize) % CACHE_SIZE;
         let mut offset = self.hash_table[hash_index];
         self.hash_table[hash_index] = ip as u32 + base_index;
 
         // Look for 3-byte match
-        let hash3 = super::compute_hash(value & 0xff_ffff);
+        let hash3 = super::compute_hash((value & 0xff_ffff) as u64);
         let hash3_index = (hash3 as usize) % CACHE3_SIZE;
         let offset3 = self.hash3_table[hash3_index];
         self.hash3_table[hash3_index] = ip as u32 + base_index;
@@ -188,12 +188,12 @@ impl BinaryTreeMatchFinder {
         data: &[u8],
         base_index: u32,
         ip: usize,
-        value: u64,
+        value: u32,
     ) -> usize {
         self.update(data, base_index, ip, value, true, found_matches)
     }
 
-    pub(crate) fn insert(&mut self, data: &[u8], base_index: u32, ip: usize, value: u64) {
+    pub(crate) fn insert(&mut self, data: &[u8], base_index: u32, ip: usize, value: u32) {
         self.update(data, base_index, ip, value, false, &mut Vec::new());
     }
 

@@ -185,7 +185,13 @@ impl NearOptimalParser {
         }
     }
 
-    fn populate_matches(&mut self, data: &[u8], base_index: u32, block_start: usize, block_length: usize) {
+    fn populate_matches(
+        &mut self,
+        data: &[u8],
+        base_index: u32,
+        block_start: usize,
+        block_length: usize,
+    ) {
         self.found_matches.clear();
         self.found_matches.push(PackedMatch {
             length: 0,
@@ -193,10 +199,10 @@ impl NearOptimalParser {
         });
 
         let mut high_water_mark = block_start + 1;
-        let max_search_pos = (block_start + block_length).min(data.len().saturating_sub(8));
+        let max_search_pos = (block_start + block_length).min(data.len().saturating_sub(4));
         let mut i = block_start.max(1);
         while i < max_search_pos {
-            let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
+            let current = u32::from_le_bytes(data[i..][..4].try_into().unwrap());
             let n = self.match_finder.get_and_insert(
                 &mut self.found_matches,
                 data,
@@ -218,8 +224,29 @@ impl NearOptimalParser {
 
             if max_len >= self.nice_length {
                 let end_index = (i + max_len).min(max_search_pos) - 1;
-                while i < end_index {
+
+                while i + 4 < end_index {
                     let current = u64::from_le_bytes(data[i..][..8].try_into().unwrap());
+
+                    if current as u32 != (current >> 8) as u32 {
+                        self.match_finder
+                            .insert(data, base_index, i, current as u32);
+                    }
+                    self.match_finder
+                        .insert(data, base_index, i + 1, (current >> 8) as u32);
+
+                    if (current >> 16) as u32 != (current >> 24) as u32 {
+                        self.match_finder
+                            .insert(data, base_index, i + 2, (current >> 16) as u32);
+                    }
+                    self.match_finder
+                        .insert(data, base_index, i + 3, (current >> 24) as u32);
+
+                    i += 4;
+                }
+
+                while i < end_index {
+                    let current = u32::from_le_bytes(data[i..][..4].try_into().unwrap());
                     self.match_finder.insert(data, base_index, i, current);
                     i += 1;
                 }
@@ -390,8 +417,8 @@ impl NearOptimalParser {
 
         const OPT_WINDOW: usize = 65536 * 2;
 
-        if data.len() >= 8 && base_index == 0 {
-            let current = u64::from_le_bytes(data[..8].try_into().unwrap());
+        if data.len() >= 4 && base_index == 0 {
+            let current = u32::from_le_bytes(data[..4].try_into().unwrap());
             self.match_finder.insert(data, base_index, 0, current);
         }
 
