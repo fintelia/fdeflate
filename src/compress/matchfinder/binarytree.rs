@@ -34,16 +34,17 @@ fn right_child(index: u32) -> usize {
 ///
 /// Based on bt_matchfinder.h from libdeflate.
 pub(crate) struct BinaryTreeMatchFinder {
-    hash3_table: Box<[u32; CACHE3_SIZE]>,
+    hash3_table: Option<Box<[u32; CACHE3_SIZE]>>,
     hash_table: Box<[u32; CACHE_SIZE]>,
     child_links: Box<[u32; WINDOW_SIZE * 2]>,
     search_depth: u16,
     early_return_length: usize,
 }
 impl BinaryTreeMatchFinder {
-    pub(crate) fn new(search_depth: u16, nice_length: u16) -> Self {
+    pub(crate) fn new(search_depth: u16, nice_length: u16, match3: bool) -> Self {
         Self {
-            hash3_table: vec![0; CACHE3_SIZE].into_boxed_slice().try_into().unwrap(),
+            hash3_table: match3
+                .then(|| vec![0; CACHE3_SIZE].into_boxed_slice().try_into().unwrap()),
             hash_table: vec![0; CACHE_SIZE].into_boxed_slice().try_into().unwrap(),
             child_links: vec![0; WINDOW_SIZE * 2]
                 .into_boxed_slice()
@@ -75,23 +76,25 @@ impl BinaryTreeMatchFinder {
         self.hash_table[hash_index] = ip as u32 + base_index;
 
         // Look for 3-byte match
-        let hash3 = super::compute_hash((value & 0xff_ffff) as u64);
-        let hash3_index = (hash3 as usize) % CACHE3_SIZE;
-        let offset3 = self.hash3_table[hash3_index];
-        self.hash3_table[hash3_index] = ip as u32 + base_index;
+        if let Some(ref mut hash3_table) = self.hash3_table {
+            let hash3 = super::compute_hash((value & 0xff_ffff) as u64);
+            let hash3_index = (hash3 as usize) % CACHE3_SIZE;
+            let offset3 = hash3_table[hash3_index];
+            hash3_table[hash3_index] = ip as u32 + base_index;
 
-        if record_matches && offset3 >= min_offset && offset3 != offset {
-            let prev = u32::from_le_bytes(
-                data[(offset3 - base_index) as usize..][..4]
-                    .try_into()
-                    .unwrap(),
-            );
-            if ((value as u32) ^ prev) & 0xffffff == 0 {
-                num_matches = 1;
-                found_matches.push(PackedMatch {
-                    length: 3,
-                    distance: (ip - (offset3 - base_index) as usize) as u16,
-                });
+            if record_matches && offset3 >= min_offset && offset3 != offset {
+                let prev = u32::from_le_bytes(
+                    data[(offset3 - base_index) as usize..][..4]
+                        .try_into()
+                        .unwrap(),
+                );
+                if ((value as u32) ^ prev) & 0xffffff == 0 {
+                    num_matches = 1;
+                    found_matches.push(PackedMatch {
+                        length: 3,
+                        distance: (ip - (offset3 - base_index) as usize) as u16,
+                    });
+                }
             }
         }
 
@@ -198,8 +201,10 @@ impl BinaryTreeMatchFinder {
     }
 
     pub(crate) fn reset_indices(&mut self, old_base_index: u32) {
-        for v in &mut *self.hash3_table {
-            *v = v.saturating_sub(old_base_index);
+        if let Some(ref mut hash3_table) = self.hash3_table {
+            for v in &mut **hash3_table {
+                *v = v.saturating_sub(old_base_index);
+            }
         }
 
         for v in &mut *self.hash_table {

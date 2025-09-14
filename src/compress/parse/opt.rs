@@ -40,9 +40,15 @@ pub(crate) struct NearOptimalParser {
 }
 
 impl NearOptimalParser {
-    pub fn new(skip_ahead_shift: u8, iters: u8, search_depth: u16, nice_length: u16) -> Self {
+    pub fn new(
+        skip_ahead_shift: u8,
+        iters: u8,
+        search_depth: u16,
+        nice_length: u16,
+        match3: bool,
+    ) -> Self {
         Self {
-            match_finder: BinaryTreeMatchFinder::new(search_depth, nice_length),
+            match_finder: BinaryTreeMatchFinder::new(search_depth, nice_length, match3),
             skip_ahead_shift,
             nice_length: nice_length as usize,
             iters,
