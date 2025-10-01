@@ -131,16 +131,18 @@ fn match_length<const MIN_MATCH8: bool>(
 fn extend_match(data: &[u8], ip: usize, prev_index: usize) -> usize {
     let mut length = 0;
 
-    let slice_length = (data.len() - ip - length).min(258 - length);
-    let mut chunks = data[ip + length..][..slice_length].chunks_exact(8);
-    let mut prev_chunks = data[prev_index + length..][..slice_length].chunks_exact(8);
+    assert!(prev_index < ip);
+
+    let current = &data[ip..];
+    let mut chunks = current.chunks_exact(8);
+    let mut prev_chunks = data[prev_index..][..current.len()].chunks_exact(8);
 
     for (chunk, prev_chunk) in (&mut chunks).zip(&mut prev_chunks) {
         if chunk == prev_chunk {
             length += 8;
         } else {
-            let chunk = u64::from_ne_bytes(chunk.try_into().unwrap());
-            let prev_chunk = u64::from_ne_bytes(prev_chunk.try_into().unwrap());
+            let chunk = u64::from_le_bytes(chunk.try_into().unwrap());
+            let prev_chunk = u64::from_le_bytes(prev_chunk.try_into().unwrap());
             length += (chunk ^ prev_chunk).trailing_zeros() as usize / 8;
             return length;
         }

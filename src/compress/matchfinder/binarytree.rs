@@ -111,14 +111,16 @@ impl BinaryTreeMatchFinder {
         let mut best_right_length = 0;
         let mut length = 0;
 
-        // let data = &data[..ip + 258.min(data.len() - ip)];
+        let data = &data[..ip + 258.min(data.len() - ip)];
 
-        // let max_length = (data.len() - ip).min(258);
+        let early_return_length = self.early_return_length.min(data.len() - ip);
 
         // Visit previous matches
         let mut depth_remaining = self.search_depth;
         loop {
-            if data[ip + length] == data[(offset - base_index) as usize + length] {
+            let mut prev_byte = data[(offset - base_index) as usize + length];
+
+            if data[ip + length] == prev_byte {
                 //length += 1;
                 length += matchfinder::extend_match(
                     data,
@@ -132,7 +134,7 @@ impl BinaryTreeMatchFinder {
                         num_matches -= 1;
                     }
 
-                    best_length = length.min(258) as u16;
+                    best_length = length as u16;
                     num_matches += 1;
                     found_matches.push(PackedMatch {
                         length: best_length,
@@ -140,17 +142,17 @@ impl BinaryTreeMatchFinder {
                     });
                 }
 
-                if length >= self.early_return_length || ip + length == data.len() {
+                if length >= early_return_length {
                     self.child_links[pending_left] = self.child_links[left_child(offset)];
                     self.child_links[pending_right] = self.child_links[right_child(offset)];
                     break;
                 }
+
+                prev_byte = data[(offset - base_index) as usize + length];
             }
 
-            assert!(ip + length < data.len());
-
-            if data[(offset - base_index) as usize + length] < data[ip + length] {
-                self.child_links[pending_left] = offset as u32;
+            if prev_byte < data[ip + length] {
+                self.child_links[pending_left] = offset;
                 pending_left = right_child(offset);
                 offset = self.child_links[pending_left];
 
@@ -160,11 +162,11 @@ impl BinaryTreeMatchFinder {
                 }
             } else {
                 assert!(
-                    data[(offset - base_index) as usize + length] > data[ip + length],
+                    prev_byte > data[ip + length],
                     "{length} {depth_remaining} {offset} {min_offset}"
                 );
 
-                self.child_links[pending_right] = offset as u32;
+                self.child_links[pending_right] = offset;
                 pending_right = left_child(offset);
                 offset = self.child_links[pending_right];
 
