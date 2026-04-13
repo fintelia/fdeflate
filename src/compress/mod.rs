@@ -190,6 +190,14 @@ impl<W: Write> Compressor<W> {
         Ok(())
     }
 
+    /// Returns a mutable reference to the underlying writer.
+    ///
+    /// Note that the compressor's internal bit buffer may hold data that has not yet been
+    /// flushed to the writer, so the writer may not contain all compressed output.
+    pub fn get_writer_mut(&mut self) -> &mut W {
+        self.writer.get_writer_mut()
+    }
+
     /// Write the remainder of the stream and return the inner writer.
     pub fn finish(mut self) -> std::io::Result<W> {
         let written = self.inner.compress(

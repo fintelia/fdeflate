@@ -44,6 +44,10 @@ impl<W: Write> BitWriter<W> {
         Ok(&mut self.writer)
     }
 
+    pub fn get_writer_mut(&mut self) -> &mut W {
+        &mut self.writer
+    }
+
     pub fn take(self) -> W {
         debug_assert_eq!(self.nbits, 0);
         self.writer
