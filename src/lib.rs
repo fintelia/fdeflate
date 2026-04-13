@@ -31,8 +31,8 @@ pub use compress::{
     Compressor, UltraFastCompressor,
 };
 pub use decompress::{
-    decompress_to_vec, decompress_to_vec_bounded, BoundedDecompressionError, DecompressionError,
-    Decompressor,
+    decompress_to_vec, decompress_to_vec_bounded, decompress_to_vec_raw,
+    decompress_to_vec_raw_bounded, BoundedDecompressionError, DecompressionError, Decompressor,
 };
 
 /// Build a length limited huffman tree.

@@ -150,6 +150,15 @@ impl Decompressor {
         }
     }
 
+    /// Create a new decompressor for raw DEFLATE streams (no zlib header or checksum).
+    pub fn new_raw() -> Self {
+        Self {
+            state: State::BlockHeader,
+            ignore_adler32: true,
+            ..Self::new()
+        }
+    }
+
     /// Ignore the checksum at the end of the stream.
     pub fn ignore_adler32(&mut self) {
         self.ignore_adler32 = true;
@@ -263,6 +272,7 @@ impl Decompressor {
                     output_index = new_output_index;
                     if compresed_block_status == CompressedBlockStatus::ReachedEndOfBlock {
                         self.state = match self.last_block {
+                            true if self.ignore_adler32 => State::Done,
                             true => State::Checksum,
                             false => State::BlockHeader,
                         };
@@ -297,7 +307,11 @@ impl Decompressor {
 
                     if self.uncompressed_bytes_left == 0 {
                         self.state = if self.last_block {
-                            State::Checksum
+                            if self.ignore_adler32 {
+                                State::Done
+                            } else {
+                                State::Checksum
+                            }
                         } else {
                             State::BlockHeader
                         };
@@ -324,7 +338,7 @@ impl Decompressor {
                         break;
                     }
                 }
-                State::Done => unreachable!(),
+                State::Done => break,
             }
         }
 
@@ -377,7 +391,11 @@ impl Decompressor {
                 if self.bits.peek_bits(7) == 0 {
                     self.bits.consume_bits(7);
                     if self.last_block {
-                        self.state = State::Checksum;
+                        self.state = if self.ignore_adler32 {
+                            State::Done
+                        } else {
+                            State::Checksum
+                        };
                         return Ok(());
                     }
 
@@ -1143,6 +1161,54 @@ pub fn decompress_to_vec_bounded(
     Ok(output)
 }
 
+/// Decompress raw DEFLATE data (no zlib header or checksum).
+pub fn decompress_to_vec_raw(input: &[u8]) -> Result<Vec<u8>, DecompressionError> {
+    match decompress_to_vec_raw_bounded(input, usize::MAX) {
+        Ok(output) => Ok(output),
+        Err(BoundedDecompressionError::DecompressionError { inner }) => Err(inner),
+        Err(BoundedDecompressionError::OutputTooLarge { .. }) => {
+            unreachable!("Impossible to allocate more than isize::MAX bytes")
+        }
+    }
+}
+
+/// Decompress raw DEFLATE data, returning an error if the output is larger than
+/// `maxlen` bytes.
+pub fn decompress_to_vec_raw_bounded(
+    input: &[u8],
+    maxlen: usize,
+) -> Result<Vec<u8>, BoundedDecompressionError> {
+    let mut decoder = Decompressor::new_raw();
+    let mut output = vec![0; 1024.min(maxlen)];
+    let mut input_index = 0;
+    let mut output_index = 0;
+
+    loop {
+        let (consumed, produced) =
+            decoder.read(&input[input_index..], &mut output, output_index)?;
+        input_index += consumed;
+        output_index += produced;
+
+        if decoder.is_done() {
+            break;
+        } else if output_index == maxlen {
+            return Err(BoundedDecompressionError::OutputTooLarge {
+                partial_output: output,
+            });
+        } else if output_index == output.len() {
+            output.resize((output_index + 32 * 1024).min(maxlen), 0);
+            continue;
+        } else if input_index == input.len() {
+            return Err(DecompressionError::InsufficientInput.into());
+        } else {
+            unreachable!("Read() call violated post-condition");
+        }
+    }
+
+    output.resize(output_index, 0);
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::tables::{LENGTH_TO_LEN_EXTRA, LENGTH_TO_SYMBOL};
@@ -1381,5 +1447,73 @@ mod tests {
             err,
             TestDecompressionError::ProdError(DecompressionError::BadLiteralLengthHuffmanTree)
         );
+    }
+
+    fn raw_roundtrip(data: &[u8]) {
+        let mut compressor =
+            crate::Compressor::new(Vec::with_capacity(data.len() / 4), 1, false).unwrap();
+        compressor.write_data(data).unwrap();
+        let compressed = compressor.finish().unwrap();
+        let decompressed = decompress_to_vec_raw(&compressed).unwrap();
+        assert_eq!(&decompressed, data);
+    }
+
+    fn raw_roundtrip_miniz_oxide(data: &[u8]) {
+        let compressed = miniz_oxide::deflate::compress_to_vec(data, 3);
+        let decompressed = decompress_to_vec_raw(&compressed).unwrap();
+        assert_eq!(&decompressed, data);
+    }
+
+    #[test]
+    fn raw_deflate_roundtrip() {
+        raw_roundtrip(b"Hello world!");
+        raw_roundtrip(&[0; 50]);
+        raw_roundtrip(&vec![5; 2048]);
+        raw_roundtrip(&vec![128; 2048]);
+        raw_roundtrip(&vec![254; 2048]);
+    }
+
+    #[test]
+    fn raw_deflate_roundtrip_miniz_oxide() {
+        raw_roundtrip_miniz_oxide(b"Hello world!");
+        raw_roundtrip_miniz_oxide(&[0; 50]);
+        raw_roundtrip_miniz_oxide(&vec![5; 2048]);
+        raw_roundtrip_miniz_oxide(&vec![128; 2048]);
+        raw_roundtrip_miniz_oxide(&vec![254; 2048]);
+    }
+
+    #[test]
+    fn raw_deflate_streaming() {
+        let input = b"Hello world! This is a test of raw DEFLATE streaming decompression.";
+        let mut compressor =
+            crate::Compressor::new(Vec::with_capacity(input.len() / 4), 1, false).unwrap();
+        compressor.write_data(input).unwrap();
+        let compressed = compressor.finish().unwrap();
+
+        let mut decompressor = Decompressor::new_raw();
+        let mut output = vec![0; 1024];
+        let mut input_index = 0;
+        let mut output_index = 0;
+
+        // Feed input byte by byte.
+        while !decompressor.is_done() {
+            let end = (input_index + 1).min(compressed.len());
+            let (consumed, produced) = decompressor
+                .read(&compressed[input_index..end], &mut output, output_index)
+                .unwrap();
+            input_index += consumed;
+            output_index += produced;
+        }
+
+        assert_eq!(&output[..output_index], &input[..]);
+    }
+
+    #[test]
+    fn raw_deflate_empty() {
+        let mut compressor = crate::Compressor::new(Vec::new(), 1, false).unwrap();
+        compressor.write_data(b"").unwrap();
+        let compressed = compressor.finish().unwrap();
+        let decompressed = decompress_to_vec_raw(&compressed).unwrap();
+        assert_eq!(decompressed, b"");
     }
 }
