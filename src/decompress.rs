@@ -355,6 +355,15 @@ impl Decompressor {
         self.state == State::Done
     }
 
+    /// Returns the number of bytes that were read from input into the internal bit buffer
+    /// but have not yet been consumed by the decompressor.
+    ///
+    /// This is useful for callers that need to know the exact number of input bytes consumed
+    /// (e.g. when the compressed data is followed by other data in the same stream).
+    pub fn unconsumed_bytes(&self) -> usize {
+        (self.bits.nbits / 8) as usize
+    }
+
     fn read_block_header(&mut self, remaining_input: &mut &[u8]) -> Result<(), DecompressionError> {
         self.bits.fill_buffer(remaining_input);
         if self.bits.nbits < 10 {
