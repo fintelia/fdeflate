@@ -208,13 +208,13 @@ impl<W: Write> Compressor<W> {
             self.input.written,
             match flush {
                 FlushKind::Partial => Flush::Partial,
-                FlushKind::Full => Flush::Finish,
+                FlushKind::Full => Flush::Full,
                 FlushKind::Sync => Flush::Sync,
             },
         )?;
         self.input.written += written;
 
-        if flush == FlushKind::Sync {
+        if flush == FlushKind::Full {
             self.input.data.clear();
             self.input.written = 0;
             if let Some(new_base_index) = self.input.base_index.checked_add(WINDOW_SIZE as u32) {
@@ -224,11 +224,11 @@ impl<W: Write> Compressor<W> {
                 self.input.base_index = WINDOW_SIZE as u32;
             }
         } else {
-            // Discard input data from before the start of the window, but avoid doing so too often.
-            let discard = self.input.written.saturating_sub(self.window_size);
-            if discard > 128 * 1024 {
-                self.input.discard_bytes(discard);
-            }
+            // // Discard input data from before the start of the window, but avoid doing so too often.
+            // let discard = self.input.written.saturating_sub(self.window_size);
+            // if discard > 128 * 1024 {
+            //     self.input.discard_bytes(discard);
+            // }
         }
 
         Ok(())
